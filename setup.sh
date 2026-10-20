@@ -257,6 +257,17 @@ pid_on_port() {
     ss -tlnp "sport = :$1" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u || true
 }
 
+# Tunggu proses lama benar-benar hilang sebelum supervisor mengstart yang baru.
+# Kalau belum, proses baru berebut port/state file → supervisor jadi FATAL.
+wait_gone() {
+    local i
+    for i in $(seq 15); do
+        pgrep "$@" >/dev/null 2>&1 || return 0
+        sleep 1
+    done
+    warn "proses lama (pgrep $*) belum hilang juga setelah 15 detik"
+}
+
 # Proses yang dulu dijalankan manual → diserahkan ke supervisor supaya ikut
 # bangun otomatis. Dilakukan SEBELUM reread/update.
 take_over_strays() {
@@ -264,7 +275,7 @@ take_over_strays() {
         if [ "$TAKE_TAILSCALE" = "1" ]; then
             warn "Hentikan tailscaled manual → pindah ke supervisor (Tailscale putus ~5 detik)"
             pkill -x tailscaled || true
-            sleep 1
+            wait_gone -x tailscaled
         else
             warn "tailscaled MASIH MANUAL (TAKE_TAILSCALE=0) — sesi Tailscale SSH tidak diputus"
             warn "Ambil-alih nanti: TAKE_TAILSCALE=1 bash $0 (jalankan pas nggak ada sesi remote)"
@@ -274,7 +285,7 @@ take_over_strays() {
     if ! supervisor_has sshd && pgrep -x sshd >/dev/null 2>&1; then
         warn "Hentikan sshd manual → pindah ke supervisor"
         pkill -x sshd || true
-        sleep 1
+        wait_gone -x sshd
     fi
 
     if ! supervisor_has site-server; then
@@ -283,14 +294,14 @@ take_over_strays() {
             warn "Hentikan web server manual (pid $p) → pindah ke supervisor"
             kill "$p" 2>/dev/null || true
         done
-        sleep 1
+        wait_gone -f "http.server $SITE_PORT"
     fi
 
     if [ "$USE_CLOUDFLARED" = 1 ] && ! supervisor_has cloudflared \
         && pgrep -f 'cloudflared tunnel --url' >/dev/null 2>&1; then
         warn "Hentikan tunnel manual → pindah ke supervisor (URL tunnel publik akan BERUBAH)"
         pkill -f 'cloudflared tunnel --url' || true
-        sleep 1
+        wait_gone -f 'cloudflared tunnel --url'
     fi
 }
 
@@ -402,9 +413,10 @@ start_service() {
     done
     if [ -n "$fallback" ]; then
         warn "$prog GAGAL di supervisor → jalankan manual sebagai cadangan"
+        warn "    cek: supervisorctl status $prog   log: /var/log/${prog}.log"
         bash -c "$fallback" || true
     else
-        warn "$prog belum jalan → cek: supervisorctl status $prog"
+        warn "$prog belum jalan → cek: supervisorctl status $prog (log: /var/log/${prog}.log)"
     fi
     return 0
 }
