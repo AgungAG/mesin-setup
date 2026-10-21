@@ -5,6 +5,9 @@
 # Semua langkah IDEMPOTEN: boleh dijalankan berkali-kali, hasilnya tetap sama.
 #
 # Yang disetup:
+#   0. Repo Google Chrome : keyring + sources.list — jalan PALING AWAL,
+#                       sebelum apt update pertama (lihat "Kenapa duluan"
+#                       di fungsi ensure_google_chrome_repo)
 #   1. Paket dasar    : git, tmux, jq, curl, ca-certificates
 #                       + gh dari repo resmi GitHub CLI (cli.github.com)
 #   2. Tailscale      : install + tailscaled jalan + login (--ssh)
@@ -78,6 +81,26 @@ TUNNEL_URL=""
 log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 
+# Ambil isi URL ke stdout. curl dulu (sudah dipakai di seluruh script),
+# wget sebagai cadangan kalau curl belum terpasang.
+fetch_url() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O - "$1"
+    else
+        return 1
+    fi
+}
+
+# apt update yang tidak mematikan script: repo pihak ketiga yang bermasalah
+# (mis. keyring hilang setelah reset) sebaiknya tidak ikut membatalkan setup.
+apt_update() {
+    if ! $SUDO apt-get update -qq; then
+        warn "apt update ada error → tetap dilanjut (cek baris error di atas)"
+    fi
+}
+
 # Script ini biasanya jalan sebagai root. `sudo` hanya dipakai kalau bukan root
 # DAN sudo tersedia — biar tidak gagal di container minimal yang tanpa sudo.
 SUDO=""
@@ -115,6 +138,67 @@ save_secrets() {
 }
 
 # =========================================================
+# 0. REPO GOOGLE CHROME — jalan PALING AWAL, sebelum apt update
+# =========================================================
+# Kenapa duluan? Image ini membawa /etc/apt/sources.list.d/google-chrome.list,
+# tapi keyring-nya (/usr/share/keyrings/google-chrome.gpg) ikut hilang tiap
+# reset → `apt update` langsung berhenti dengan NO_PUBKEY, dan karena script
+# ini pakai `set -e` semua langkah setelahnya ikut mati.
+# Jadi: perbaiki keyring dulu, baru apt-get update yang lain.
+#
+# Ini pengganti dua command manual yang dulu harus diketik tiap reset:
+#   wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
+#     | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+#   echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] \
+#     http://dl.google.com/linux/chrome/deb/ stable main" \
+#     | sudo tee /etc/apt/sources.list.d/google-chrome.list
+#
+# Idempoten: kalau list + keyring sudah ada, dilewati.
+# ($SUDO sengaja tidak di-quote: nilainya "" atau "sudo")
+# shellcheck disable=SC2086
+ensure_google_chrome_repo() {
+    local keyring="/usr/share/keyrings/google-chrome.gpg"
+    local list="/etc/apt/sources.list.d/google-chrome.list"
+    local key_url="https://dl.google.com/linux/linux_signing_key.pub"
+
+    if [ -s "$keyring" ] && [ -f "$list" ]; then
+        log "Repo Google Chrome sudah siap ($list)"
+        return 0
+    fi
+
+    log "Siapkan repo Google Chrome (biar apt update tidak NO_PUBKEY)..."
+    $SUDO mkdir -p /usr/share/keyrings /etc/apt/sources.list.d
+
+    if [ ! -s "$keyring" ]; then
+        if ! command -v gpg >/dev/null 2>&1; then
+            warn "gpg tidak ada → keyring Google Chrome tidak bisa dibuat"
+            warn "  install dulu: apt-get install -y gnupg"
+        else
+            local tmp
+            tmp=$(mktemp)
+            if fetch_url "$key_url" > "$tmp.pub" && [ -s "$tmp.pub" ] \
+                && gpg --dearmor < "$tmp.pub" > "$tmp.gpg" 2>/dev/null \
+                && [ -s "$tmp.gpg" ]; then
+                $SUDO install -m 644 "$tmp.gpg" "$keyring"
+                log "Keyring Google Chrome → $keyring"
+            else
+                warn "Ambil key Google Chrome gagal → apt update bisa error NO_PUBKEY"
+                warn "  manual: curl -fsSL $key_url | gpg --dearmor -o $keyring"
+            fi
+            rm -f "$tmp.pub" "$tmp.gpg"
+        fi
+    fi
+
+    # Source-nya ditulis juga kalau belum ada (mesin benar-benar fresh).
+    # arch=amd64 sengaja: repo Chrome memang cuma untuk amd64.
+    if [ ! -f "$list" ]; then
+        echo "deb [arch=amd64 signed-by=$keyring] http://dl.google.com/linux/chrome/deb/ stable main" \
+            | $SUDO tee "$list" >/dev/null
+        log "Source Google Chrome → $list"
+    fi
+}
+
+# =========================================================
 # 1. PAKET DASAR
 # =========================================================
 install_packages() {
@@ -127,7 +211,7 @@ install_packages() {
         return
     fi
     log "Install paket: ${need[*]}"
-    apt-get update -qq
+    apt_update
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${need[@]}"
 }
 
@@ -157,7 +241,7 @@ install_gh() {
     echo "deb [arch=$(dpkg --print-architecture) signed-by=$keyring] https://cli.github.com/packages stable main" \
         | $SUDO tee "$list" >/dev/null
 
-    $SUDO apt update
+    apt_update
     DEBIAN_FRONTEND=noninteractive $SUDO apt install -y gh
     command -v gh >/dev/null 2>&1 || warn "install gh gagal → cek koneksi ke cli.github.com"
 }
@@ -250,7 +334,7 @@ install_opencode() {
 install_ssh() {
     if ! command -v sshd >/dev/null 2>&1; then
         log "Install openssh-server..."
-        apt-get update -qq
+        apt_update
         DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server
     else
         log "OpenSSH sudah terinstall"
@@ -664,6 +748,8 @@ start_dev_session() {
 main() {
     load_secrets
 
+    # PALING AWAL — kalau dilewat, apt update pertama bisa gagal NO_PUBKEY.
+    ensure_google_chrome_repo
     install_packages
     install_gh
     ensure_setup_repo

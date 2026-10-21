@@ -15,6 +15,10 @@ bash setup.sh
 
 Selesai — sisanya jalan sendiri.
 
+Dua command manual Google Chrome (keyring + `sources.list`) yang dulu harus
+dijalankan dulu biar `sudo apt update` jalan **sudah masuk di dalam script**
+sebagai langkah paling awal — jadi tidak perlu diketik lagi tiap reset.
+
 ## Opsi (environment variable)
 
 Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
@@ -33,6 +37,9 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 
 ## Yang disetup
 
+0. Repo Google Chrome: keyring + `/etc/apt/sources.list.d/google-chrome.list`
+   — jalan **paling awal**, sebelum `apt update` pertama, biar reset pertama
+   tidak berhenti dengan error `NO_PUBKEY`
 1. Paket dasar: `git tmux gh jq curl ca-certificates`
 2. Tailscale (install + login `--ssh`) + `tailscale serve` → `https://<mesin>.ts.net`
 3. OpenCode (install + PATH)
