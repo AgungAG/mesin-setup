@@ -5,7 +5,8 @@
 # Semua langkah IDEMPOTEN: boleh dijalankan berkali-kali, hasilnya tetap sama.
 #
 # Yang disetup:
-#   1. Paket dasar    : git, tmux, gh, jq, curl, ca-certificates
+#   1. Paket dasar    : git, tmux, jq, curl, ca-certificates
+#                       + gh dari repo resmi GitHub CLI (cli.github.com)
 #   2. Tailscale      : install + tailscaled jalan + login (--ssh)
 #   3. OpenCode       : install + PATH di .bashrc
 #   4. SSH            : openssh-server + login root via password
@@ -77,6 +78,13 @@ TUNNEL_URL=""
 log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 
+# Script ini biasanya jalan sebagai root. `sudo` hanya dipakai kalau bukan root
+# DAN sudo tersedia — biar tidak gagal di container minimal yang tanpa sudo.
+SUDO=""
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+fi
+
 # =========================================================
 # 0. SECRET
 # =========================================================
@@ -111,16 +119,47 @@ save_secrets() {
 # =========================================================
 install_packages() {
     local need=() p
-    for p in git tmux gh jq curl ca-certificates; do
+    for p in git tmux jq curl ca-certificates; do
         dpkg -s "$p" >/dev/null 2>&1 || need+=("$p")
     done
     if [ "${#need[@]}" -eq 0 ]; then
-        log "Paket dasar sudah lengkap (git tmux gh jq curl ca-certificates)"
+        log "Paket dasar sudah lengkap (git tmux jq curl ca-certificates)"
         return
     fi
     log "Install paket: ${need[*]}"
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${need[@]}"
+}
+
+# gh dipasang dari repo resmi GitHub CLI (cli.github.com), bukan paket Debian
+# bawaan → versinya selalu fresh dan di-update oleh GitHub.
+# Idempoten: kalau gh + keyring + source-nya sudah ada, dilewati.
+# ($SUDO sengaja tidak di-quote: nilainya "" atau "sudo")
+# shellcheck disable=SC2086
+install_gh() {
+    local keyring="/etc/apt/keyrings/githubcli-archive-keyring.gpg"
+    local list="/etc/apt/sources.list.d/github-cli.list"
+
+    if command -v gh >/dev/null 2>&1 && [ -s "$keyring" ] && [ -f "$list" ]; then
+        log "GitHub CLI sudah terinstall ($(gh --version 2>/dev/null | head -1))"
+        return
+    fi
+
+    log "Install GitHub CLI dari repo resmi (cli.github.com)..."
+    $SUDO mkdir -p -m 755 /etc/apt/keyrings
+
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | $SUDO tee "$keyring" >/dev/null
+
+    $SUDO chmod go+r "$keyring"
+    $SUDO mkdir -p /etc/apt/sources.list.d
+
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=$keyring] https://cli.github.com/packages stable main" \
+        | $SUDO tee "$list" >/dev/null
+
+    $SUDO apt update
+    DEBIAN_FRONTEND=noninteractive $SUDO apt install -y gh
+    command -v gh >/dev/null 2>&1 || warn "install gh gagal → cek koneksi ke cli.github.com"
 }
 
 # =========================================================
@@ -626,6 +665,7 @@ main() {
     load_secrets
 
     install_packages
+    install_gh
     ensure_setup_repo
     install_tailscale
     install_ssh
