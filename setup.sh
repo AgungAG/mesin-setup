@@ -10,12 +10,14 @@
 #                       di fungsi ensure_google_chrome_repo)
 #   1. Paket dasar    : git, tmux, jq, curl, ca-certificates
 #                       + gh dari repo resmi GitHub CLI (cli.github.com)
-#   2. Tailscale      : install + tailscaled jalan + login (--ssh)
-#   3. OpenCode       : install + PATH di .bashrc
-#   4. SSH            : openssh-server + login root via password
-#   5. Web toko roti  : http.server :8000 di /root/toko-roti
-#   6. Akses online   : tailscale serve (URL tetap) + tunnel cloudflared (opsional)
-#   7. GitHub         : gh login dari GH_TOKEN, identitas git, auto-commit toko-roti
+#   2. Google Chrome  : google-chrome-stable (bisa dimatikan: INSTALL_CHROME=0)
+#   3. Tailscale      : install + tailscaled jalan + login (--ssh)
+#   4. OpenCode       : install + PATH di .bashrc
+#   5. SSH            : openssh-server TANPA password (kunci saja;
+#                       akses harian lewat Tailscale SSH, tanpa password)
+#   6. Web toko roti  : http.server :8000 di /root/toko-roti
+#   7. Akses online   : tailscale serve (URL tetap) + tunnel cloudflared (opsional)
+#   8. GitHub         : gh login dari GH_TOKEN, identitas git, auto-commit toko-roti
 #
 # CARA KERJA PENTING:
 #   tailscaled, sshd, web server, dan tunnel dijaga SUPERVISORD — yang memang
@@ -30,16 +32,18 @@
 #   curl -fsSL -o setup.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/main/setup.sh
 #   bash setup.sh
 #   Repo setup.sh ini PUBLIK supaya bisa diambil tanpa token sama sekali.
-#   Yang dibutuhkan tinggal: TS_AUTHKEY / ROOT_PASSWORD / GH_TOKEN (isi via env
+#   Yang dibutuhkan tinggal: TS_AUTHKEY / GH_TOKEN (isi via env
 #   atau tulis ke /root/.machine-secrets dengan format NAME=value, chmod 600).
 #   Repo toko-roti PRIVAT → butuh GH_TOKEN untuk clone/push.
+#   TIDAK ada password root: akses masuk pakai Tailscale SSH (login Tailscale).
 #
 # Environment variable (semua opsional; juga bisa dititip di /root/.machine-secrets
 # supaya tidak perlu diketik ulang tiap restore):
 #   TS_AUTHKEY=tskey-auth-xxxx  Login Tailscale otomatis tanpa klik link.
 #                               Ambil dari: https://login.tailscale.com/admin/settings/keys
-#   ROOT_PASSWORD=rahasia123    Password root. Kalau kosong dibuat random, lalu disimpan.
 #   GH_TOKEN=ghp_xxxx           Token GitHub supaya gh login otomatis.
+#   INSTALL_CHROME=0           Lewati install google-chrome-stable (default 1).
+#                               Repo Chrome-nya tetap dipasang di langkah 0.
 #   SITE_REPO=AgungAG/toko-roti Repo tujuan push backup toko-roti.
 #   SITE_PORT=8000              Port web toko roti (default 8000).
 #   USE_CLOUDFLARED=0           Matikan tunnel publik (default: 1 = aktif).
@@ -70,9 +74,9 @@ TUNNEL_URL_FILE="/root/cloudflared-url.txt"
 HANDOVER_LOG="/root/setup-takeover.log"
 
 TS_AUTHKEY="${TS_AUTHKEY:-}"
-ROOT_PASSWORD="${ROOT_PASSWORD:-}"
 GH_TOKEN="${GH_TOKEN:-}"
 SITE_REPO="${SITE_REPO:-AgungAG/toko-roti}"
+INSTALL_CHROME="${INSTALL_CHROME:-1}"
 
 # Hasil yang dicetak di ringkasan akhir
 SERVE_URL=""
@@ -111,7 +115,7 @@ fi
 # =========================================================
 # 0. SECRET
 # =========================================================
-# Supaya reset tidak bikin lupa password/token: simpan sekali, baca lagi.
+# Supaya reset tidak bikin lupa token: simpan sekali, baca lagi.
 load_secrets() {
     [ -r "$SECRET_FILE" ] || return 0
     set +u
@@ -124,7 +128,7 @@ load_secrets() {
 save_secrets() {
     local tmp="${SECRET_FILE}.tmp" var val
     : > "$tmp"
-    for var in ROOT_PASSWORD TS_AUTHKEY GH_TOKEN; do
+    for var in TS_AUTHKEY GH_TOKEN; do
         val="${!var:-}"
         [ -n "$val" ] || continue
         printf '%s=%q\n' "$var" "$val" >> "$tmp"
@@ -247,7 +251,31 @@ install_gh() {
 }
 
 # =========================================================
-# 2. TAILSCALE
+# 2. GOOGLE CHROME
+# =========================================================
+# Chrome dari repo resmi Google (sudah dipasang di langkah 0), bukan file .deb
+# manual. Idempoten: kalau sudah terinstall, dilewati.
+install_chrome() {
+    if [ "$INSTALL_CHROME" != "1" ]; then
+        log "Install Chrome dimatikan (INSTALL_CHROME=0)"
+        return
+    fi
+    if dpkg -s google-chrome-stable >/dev/null 2>&1; then
+        log "Google Chrome sudah terinstall ($(dpkg-query -W -f='${Version}' google-chrome-stable 2>/dev/null))"
+        return
+    fi
+    log "Install google-chrome-stable..."
+    apt_update
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable; then
+        log "Google Chrome terpasang ($(command -v google-chrome-stable || echo '/usr/bin/google-chrome'))"
+    else
+        warn "Install Chrome gagal → cek koneksi ke dl.google.com, lalu jalankan ulang:"
+        warn "    INSTALL_CHROME=1 bash $0"
+    fi
+}
+
+# =========================================================
+# 3. TAILSCALE
 # =========================================================
 install_tailscale() {
     if command -v tailscale >/dev/null 2>&1; then
@@ -311,7 +339,7 @@ setup_serve() {
 }
 
 # =========================================================
-# 3. OPENCODE
+# 4. OPENCODE
 # =========================================================
 install_opencode() {
     if [ -x "$OPENCODE_DIR/opencode" ]; then
@@ -329,8 +357,14 @@ install_opencode() {
 }
 
 # =========================================================
-# 4. SSH
+# 5. SSH — TANPA password root
 # =========================================================
+# Akses harian lewat Tailscale SSH: `tailscale ssh root@<ip>` dari Termius.
+# Diautentikasi oleh identitas Tailscale (lihat log tailscaled: "access granted
+# to <email> as ssh-user root"), TIDAK lewat sshd dan tidak butuh password —
+# jadi password root tidak usah dibuat/disimpan sama sekali.
+#
+# sshd tetap jalan sebagai cadangan, tapi hanya menerima kunci publik.
 install_ssh() {
     if ! command -v sshd >/dev/null 2>&1; then
         log "Install openssh-server..."
@@ -341,21 +375,39 @@ install_ssh() {
     fi
 }
 
-configure_ssh() {
-    log "Konfigurasi login root via password..."
-    mkdir -p /etc/ssh/sshd_config.d
-    printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' > /etc/ssh/sshd_config.d/root-login.conf
+# sshd: matikan login password (termasuk root) → cuma kunci publik.
+# File konfigurasi lama yang dulu mengaktifkan password root ikut dibersihkan.
+# SSH_CHANGED=1 kalau ada perubahan, supaya main() tahu sshd perlu di-reload.
+# Validasi sshd -t dulu: kalau konfigurasi ditolak, file dibuang (jangan sampai
+# sshd ikut mati gara-gara salah tulis).
+harden_ssh() {
+    SSH_CHANGED=0
+    local conf="/etc/ssh/sshd_config.d/50-no-password.conf"
 
-    if [ -z "$ROOT_PASSWORD" ]; then
-        ROOT_PASSWORD=$(openssl rand -base64 12 | tr -d '/+=')
-        warn "Password root BARU dibuat random: $ROOT_PASSWORD"
+    log "sshd: password login dimatikan (akses harian pakai Tailscale SSH)"
+    mkdir -p /etc/ssh/sshd_config.d
+    rm -f /etc/ssh/sshd_config.d/root-login.conf
+    [ -f "$conf" ] || SSH_CHANGED=1
+
+    printf '%s\n' \
+        '# Dibuat otomatis oleh setup.sh — perubahan ditimpa.' \
+        '# Password login dimatikan. Root masuk lewat Tailscale SSH (tanpa password)' \
+        '# atau lewat kunci publik di /root/.ssh/authorized_keys.' \
+        'PermitRootLogin prohibit-password' \
+        'PubkeyAuthentication yes' \
+        'PasswordAuthentication no' \
+        'ChallengeResponseAuthentication no' \
+        > "$conf"
+
+    if command -v sshd >/dev/null 2>&1 && ! sshd -t >/dev/null 2>&1; then
+        warn "Konfigurasi sshd tidak valid → konfigurasi baru dibuang, sshd dibiarkan seperti adanya"
+        rm -f "$conf"
+        SSH_CHANGED=0
     fi
-    echo "root:$ROOT_PASSWORD" | chpasswd
-    log "Password root di-set (sshd-nya nanti dijalankan supervisor)"
 }
 
 # =========================================================
-# 5. SUPERVISOR — semua daemon di sini
+# 6. SUPERVISOR — semua daemon di sini
 # =========================================================
 # Kenapa supervisor? Container ini tanpa systemd, tapi supervisord sudah jalan
 # dari awal container hidup + auto-restart. Service yang dipasang di sini ikut
@@ -545,7 +597,7 @@ start_service() {
 }
 
 # =========================================================
-# 6. WEB TOKO ROTI + TUNNEL
+# 7. WEB TOKO ROTI + TUNNEL
 # =========================================================
 ensure_site() {
     # Dipanggil SEBELUM supervisor → direktori harus sudah ada, nanti clone-nya
@@ -608,7 +660,7 @@ capture_tunnel_url() {
 }
 
 # =========================================================
-# 7. GITHUB + BACKUP TOKO ROTI
+# 8. GITHUB + BACKUP TOKO ROTI
 # =========================================================
 setup_gh() {
     command -v gh >/dev/null 2>&1 || return 0
@@ -680,7 +732,7 @@ backup_site() {
 }
 
 # =========================================================
-# 8. BACKUP SCRIPT INI SENDIRI
+# 9. BACKUP SCRIPT INI SENDIRI
 # =========================================================
 # /root/setup.sh = symlink ke /root/mesin-setup/setup.sh (repo GitHub).
 # Repo-nya PUBLIK supaya bisa di-clone tanpa token — jadi restore-nya tetap
@@ -757,8 +809,9 @@ main() {
     install_ssh
     install_opencode
     install_cloudflared
+    install_chrome
     ensure_site
-    configure_ssh
+    harden_ssh
 
     resolve_binaries
     write_supervisor_confs
@@ -790,6 +843,13 @@ main() {
     fi
 
     start_service sshd "${SSHD_BIN}"
+
+    # Konfigurasi sshd baru (dari harden_ssh) butuh reload. SIGHUP tidak
+    # membunuh listener dan tidak mengganggu sesi yang sedang berjalan.
+    if [ "${SSH_CHANGED:-0}" = "1" ] && pgrep -x sshd >/dev/null 2>&1; then
+        pkill -HUP -x sshd && log "sshd di-reload → password login sudah nonaktif" || true
+    fi
+
     start_service site-server "cd ${SITE_DIR} && nohup ${PY_BIN} -m http.server ${SITE_PORT} --bind 0.0.0.0 >/var/log/site-server.log 2>&1 &"
     if [ "$USE_CLOUDFLARED" = "1" ]; then
         start_service cloudflared "${CLOUDFLARED_BIN} tunnel --url http://localhost:${SITE_PORT}"
@@ -828,11 +888,8 @@ summary() {
     fi
     echo "  Web lokal     : http://localhost:${SITE_PORT}   (dir: ${SITE_DIR})"
     echo "  OpenCode      : $(command -v opencode 2>/dev/null || echo "$OPENCODE_DIR/opencode")"
-    echo "  SSH           : root@${ts_ip} port 22  (atau tailscale SSH dari Termius)"
+    echo "  SSH           : tailscale ssh root@${ts_ip}  (tanpa password; dari Termius/HP)"
     echo "  tmux          : tmux attach -t ${DEV_SESSION}"
-    if [ -n "$ROOT_PASSWORD" ]; then
-        echo "  Password root : $ROOT_PASSWORD"
-    fi
     echo "  Secret        : $SECRET_FILE (chmod 600)"
     echo
     echo "Status service (supervisor):"
