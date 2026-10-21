@@ -13,17 +13,21 @@
 #   2. Google Chrome  : google-chrome-stable (bisa dimatikan: INSTALL_CHROME=0)
 #   3. Tailscale      : install + tailscaled jalan + login (--ssh)
 #   4. OpenCode       : install + PATH di .bashrc
-#   5. SSH            : openssh-server TANPA password (kunci saja;
-#                       akses harian lewat Tailscale SSH, tanpa password)
+#   5. SSH            : TIDAK dipasang — akses masuk lewat Tailscale SSH
 #   6. Web toko roti  : http.server :8000 di /root/toko-roti
 #   7. Akses online   : tailscale serve (URL tetap) + tunnel cloudflared (opsional)
 #   8. GitHub         : gh login dari GH_TOKEN, identitas git, auto-commit toko-roti
 #
 # CARA KERJA PENTING:
-#   tailscaled, sshd, web server, dan tunnel dijaga SUPERVISORD — yang memang
+#   tailscaled, web server, dan tunnel dijaga SUPERVISORD — yang memang
 #   sudah jalan sejak container hidup dan auto-restart. Bukan `nohup &` manual.
 #   Jadi service ikut bangun sendiri tiap mesin hidup, tanpa diapa-apain.
 #   Desktop/VNC/nginx itu urusan image bawaan — script ini tidak menyentuhnya.
+#
+# SSH:
+#   TIDAK ada openssh-server/sshd — percuma, karena akses masuk lewat Tailscale
+#   SSH yang ditangani langsung oleh tailscaled, bukan oleh sshd. openssh-client
+#   tetap ada (buat git ssh dan `tailscale ssh`). Alasan lengkap: remove_sshd.
 #
 # Pemakaian:
 #   bash setup.sh
@@ -357,53 +361,33 @@ install_opencode() {
 }
 
 # =========================================================
-# 5. SSH — TANPA password root
+# 5. SSH — TIDAK DIPASANG (sshd memang tidak berguna di sini)
 # =========================================================
 # Akses harian lewat Tailscale SSH: `tailscale ssh root@<ip>` dari Termius.
-# Diautentikasi oleh identitas Tailscale (lihat log tailscaled: "access granted
-# to <email> as ssh-user root"), TIDAK lewat sshd dan tidak butuh password —
-# jadi password root tidak usah dibuat/disimpan sama sekali.
+# Diautentikasi oleh identitas Tailscale, dan protokol SSH-nya ditangani
+# langsung oleh tailscaled (lihat log: "access granted ... as ssh-user root",
+# child-nya /usr/bin/login -f) — BUKAN oleh /usr/sbin/sshd.
+# Jadi openssh-server tidak perlu sama sekali: tidak dipakai, tidak ada yang
+# login lewat port 22, dan nginx/web image ini juga tidak meneruskan port 22.
+# openssh-client TETAP ada (dipakai git ssh dan `tailscale ssh`).
 #
-# sshd tetap jalan sebagai cadangan, tapi hanya menerima kunci publik.
-install_ssh() {
-    if ! command -v sshd >/dev/null 2>&1; then
-        log "Install openssh-server..."
-        apt_update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server
-    else
-        log "OpenSSH sudah terinstall"
+# Kalau suatu saat butuh sshd (misal Tailscale mati total):
+#   apt-get install -y openssh-server
+remove_sshd() {
+    if dpkg -s openssh-server >/dev/null 2>&1 || command -v sshd >/dev/null 2>&1; then
+        log "Hapus openssh-server (sshd tidak dipakai: akses lewat Tailscale SSH)..."
+        supervisorctl stop sshd >/dev/null 2>&1 || true
+        pkill -x sshd 2>/dev/null || true
+        wait_gone -x sshd
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y openssh-server >/dev/null 2>&1 \
+            || warn "purge openssh-server gagal → cek: apt-get install -f"
     fi
-}
 
-# sshd: matikan login password (termasuk root) → cuma kunci publik.
-# File konfigurasi lama yang dulu mengaktifkan password root ikut dibersihkan.
-# SSH_CHANGED=1 kalau ada perubahan, supaya main() tahu sshd perlu di-reload.
-# Validasi sshd -t dulu: kalau konfigurasi ditolak, file dibuang (jangan sampai
-# sshd ikut mati gara-gara salah tulis).
-harden_ssh() {
-    SSH_CHANGED=0
-    local conf="/etc/ssh/sshd_config.d/50-no-password.conf"
+    # sisa yang dulu dibuat script ini, dibersihkan walau paketnya sudah tidak ada
+    rm -f /etc/ssh/sshd_config.d/50-no-password.conf /etc/ssh/sshd_config.d/root-login.conf /var/log/sshd.log
+    rmdir /etc/ssh/sshd_config.d /run/sshd 2>/dev/null || true
 
-    log "sshd: password login dimatikan (akses harian pakai Tailscale SSH)"
-    mkdir -p /etc/ssh/sshd_config.d
-    rm -f /etc/ssh/sshd_config.d/root-login.conf
-    [ -f "$conf" ] || SSH_CHANGED=1
-
-    printf '%s\n' \
-        '# Dibuat otomatis oleh setup.sh — perubahan ditimpa.' \
-        '# Password login dimatikan. Root masuk lewat Tailscale SSH (tanpa password)' \
-        '# atau lewat kunci publik di /root/.ssh/authorized_keys.' \
-        'PermitRootLogin prohibit-password' \
-        'PubkeyAuthentication yes' \
-        'PasswordAuthentication no' \
-        'ChallengeResponseAuthentication no' \
-        > "$conf"
-
-    if command -v sshd >/dev/null 2>&1 && ! sshd -t >/dev/null 2>&1; then
-        warn "Konfigurasi sshd tidak valid → konfigurasi baru dibuang, sshd dibiarkan seperti adanya"
-        rm -f "$conf"
-        SSH_CHANGED=0
-    fi
+    log "sshd tidak dipasang (akses lewat Tailscale SSH; openssh-client tetap ada untuk git)"
 }
 
 # =========================================================
@@ -414,7 +398,6 @@ harden_ssh() {
 # bangun sendiri tiap mesin hidup — tanpa `bash setup.sh` lagi.
 resolve_binaries() {
     TSD_BIN="$(command -v tailscaled || echo /usr/sbin/tailscaled)"
-    SSHD_BIN="$(command -v sshd || echo /usr/sbin/sshd)"
     PY_BIN="$(command -v python3 || echo /usr/bin/python3)"
     # tailscaled yang masih dijalankan manual (belum diawasi supervisor)
     TAILSCALE_STRAY=0
@@ -455,12 +438,6 @@ take_over_strays() {
             warn "tailscaled MASIH MANUAL (TAKE_TAILSCALE=0) — sesi Tailscale SSH tidak diputus"
             warn "Ambil-alih nanti: TAKE_TAILSCALE=1 bash $0 (jalankan pas nggak ada sesi remote)"
         fi
-    fi
-
-    if ! supervisor_has sshd && pgrep -x sshd >/dev/null 2>&1; then
-        warn "Hentikan sshd manual → pindah ke supervisor"
-        pkill -x sshd || true
-        wait_gone -x sshd
     fi
 
     if ! supervisor_has site-server; then
@@ -513,19 +490,6 @@ stdout_logfile=/var/log/tailscaled.log
 stdout_logfile_maxbytes=10485760
 stdout_logfile_backups=3
 environment=HOME="/root",USER="root"
-
-[program:sshd]
-priority=10
-autostart=true
-autorestart=true
-command=/bin/bash -c "mkdir -p /run/sshd && exec ${SSHD_BIN} -D -e"
-startsecs=3
-stopasgroup=true
-killasgroup=true
-redirect_stderr=true
-stdout_logfile=/var/log/sshd.log
-stdout_logfile_maxbytes=10485760
-stdout_logfile_backups=3
 
 [program:site-server]
 priority=20
@@ -806,12 +770,10 @@ main() {
     install_gh
     ensure_setup_repo
     install_tailscale
-    install_ssh
     install_opencode
     install_cloudflared
     install_chrome
     ensure_site
-    harden_ssh
 
     resolve_binaries
     write_supervisor_confs
@@ -834,20 +796,13 @@ main() {
 
     take_over_strays
     reload_supervisor
+    remove_sshd
 
     # tailscaled: dilewati kalau sengaja ditunda (masih manual & berjalan)
     if [ "$TAKE_TAILSCALE" = "0" ] && [ "$TAILSCALE_STRAY" = "1" ]; then
         warn "tailscaled masih dijalankan manual (defer)"
     else
         start_service tailscaled "cd / && nohup ${TSD_BIN} --tun=userspace-networking --socks5-server=localhost:1055 --state=/var/lib/tailscale/tailscaled.state >/var/log/tailscaled.log 2>&1 &"
-    fi
-
-    start_service sshd "${SSHD_BIN}"
-
-    # Konfigurasi sshd baru (dari harden_ssh) butuh reload. SIGHUP tidak
-    # membunuh listener dan tidak mengganggu sesi yang sedang berjalan.
-    if [ "${SSH_CHANGED:-0}" = "1" ] && pgrep -x sshd >/dev/null 2>&1; then
-        pkill -HUP -x sshd && log "sshd di-reload → password login sudah nonaktif" || true
     fi
 
     start_service site-server "cd ${SITE_DIR} && nohup ${PY_BIN} -m http.server ${SITE_PORT} --bind 0.0.0.0 >/var/log/site-server.log 2>&1 &"
@@ -902,7 +857,7 @@ summary() {
     fi
     echo
     echo "Catatan:"
-    echo "  • tailscaled/sshd/web/tunnel dijaga supervisord → ikut bangun sendiri"
+    echo "  • tailscaled/web/tunnel dijaga supervisord → ikut bangun sendiri"
     echo "    tiap container hidup. Cek: supervisorctl status"
     echo "  • URL https://...ts.net hanya bisa dibuka dari device yang sudah masuk"
     echo "    tailnet (HP/laptop yang login Tailscale). Luar tailnet → pakai tunnel"

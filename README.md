@@ -21,9 +21,11 @@ dijalankan dulu biar `sudo apt update` jalan **sudah masuk di dalam script**
 sebagai langkah paling awal — jadi tidak perlu diketik lagi tiap reset.
 
 Chrome sendiri (`google-chrome-stable`) juga ikut terinstall otomatis, dan
-**password root tidak dibuat lagi** — akses masuk lewat Tailscale SSH
-(`tailscale ssh root@<ip>` dari Termius/HP), yang diautentikasi oleh identitas
-Tailscale. sshd tetap jalan sebagai cadangan, tapi cuma menerima kunci publik.
+**password root tidak dipakai sama sekali** — akses masuk lewat Tailscale SSH
+(`tailscale ssh root@<ip>` dari Termius/HP) yang diautentikasi oleh identitas
+Tailscale. Karena itu `openssh-server`/**sshd tidak dipasang sama sekali**:
+protokol SSH-nya ditangani tailscaled, jadi sshd hanya membuka port 22 yang
+tidak dipakai siapa pun (`openssh-client` tetap ada untuk git ssh).
 
 ## Opsi (environment variable)
 
@@ -50,7 +52,8 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 2. Google Chrome: `google-chrome-stable` dari repo resmi Google (`INSTALL_CHROME=0` untuk lewati)
 3. Tailscale (install + login `--ssh`) + `tailscale serve` → `https://<mesin>.ts.net`
 4. OpenCode (install + PATH)
-5. OpenSSH **tanpa password** (pubkey saja) — akses harian lewat Tailscale SSH
+5. SSH: **tidak dipasang** — akses lewat Tailscale SSH (ditangani tailscaled);
+   kalau `openssh-server` kepasang (misal dari image) script ini membersihkannya
 6. Web toko roti: `python3 -m http.server` di `/root/toko-roti`
 7. Tunnel publik cloudflared (URL disimpan di `/root/cloudflared-url.txt`)
 8. GitHub: `gh login`, identitas git, auto-commit + push `toko-roti` dan script ini
@@ -58,10 +61,11 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 ## Catatan penting
 
 - **Masuk mesin: `tailscale ssh root@<tailscale-ip>`** (dari Termius di HP).
-  Tidak ada password root — login dibuka oleh identitas Tailscale di tailscaled,
-  bukan oleh sshd. Kalau butuh sshd, cuma kunci publik di
-  `/root/.ssh/authorized_keys` yang diterima.
-- **Semua daemon (tailscaled, sshd, web, tunnel) dijaga supervisord**, bukan
+  Tidak ada password root, dan tidak ada sshd — protokol SSH ditangani
+  tailscaled dengan identitas Tailscale. Kalau suatu saat butuh sshd beneran:
+  `apt-get install -y openssh-server` (jalankan `bash setup.sh` lagi untuk
+  membuangnya lagi).
+- **Semua daemon (tailscaled, web, tunnel) dijaga supervisord**, bukan
   `nohup &` manual — jadi ikut bangun sendiri tiap container hidup.
   Cek: `supervisorctl status`.
 - Desktop/VNC/nginx itu urusan image bawaan, tidak disentuh script ini.
