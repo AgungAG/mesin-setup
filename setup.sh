@@ -838,6 +838,67 @@ backup_site() {
 }
 
 # =========================================================
+# 8a. KASIR ROTI — restore sumber dari GitHub + build
+# =========================================================
+# Sumber kasir-roti disimpan sebagai BRANCH `kasir-roti` di repo privat
+# AgungAG/toko-roti (bukan repo izin: fine-grained PAT mesin ini tidak
+# diizinkan membuat repo baru, jadi dipigarkan ke repo yang sudah ada).
+# Urutan: dipanggil SETELAH setup_gh (butuh login gh untuk repo privat)
+# dan SEBELUM write_supervisor_confs (butuh binary siap untuk conf kasir).
+restore_kasir() {
+    command -v git >/dev/null 2>&1 || return 0
+    local kasir_bin="/usr/local/bin/kasir-roti" src="/root/kasir-roti"
+    if [ -x "$kasir_bin" ]; then
+        log "kasir-roti sudah terpasang ($kasir_bin)"
+        return 0
+    fi
+    if [ ! -d "$src/.git" ]; then
+        [ -n "$SITE_REPO" ] || return 0
+        log "Clone branch kasir-roti dari github.com/${SITE_REPO%.git} → $src ..."
+        if ! gh repo clone "${SITE_REPO%.git}" "$src" -- --branch kasir-roti --single-branch --quiet; then
+            warn "Clone kasir-roti gagal (butuh GH_TOKEN / koneksi) → kasir web dilewati"
+            return 0
+        fi
+        log "kasir-roti pulih dari GitHub"
+    fi
+    # build bila toolchain Rust tersedia; kalau belum, coba pasang lewat apt
+    if ! command -v cargo >/dev/null 2>&1; then
+        log "Install rustc + cargo (untuk build kasir-roti)..."
+        DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq rustc cargo >/dev/null 2>&1 \
+            || warn "Install rustc/cargo gagal → kasir-roti tidak bisa di-build kali ini"
+    fi
+    if command -v cargo >/dev/null 2>&1; then
+        log "Build kasir-roti (cargo build --release)..."
+        if (cd "$src" && cargo build --release --quiet); then
+            $SUDO install -m755 "$src/target/release/kasir-roti" "$kasir_bin"
+            log "Kasir web terpasang → $kasir_bin"
+        else
+            warn "cargo build kasir-roti gagal → web kasir tidak jadi dipasang"
+        fi
+    fi
+    return 0
+}
+
+# Backup source kasir-roti: commit + push ke branch kasir-roti (repo privat).
+backup_kasir() {
+    local src="/root/kasir-roti"
+    command -v git >/dev/null 2>&1 || return 0
+    [ -d "$src/.git" ] || return 0
+    git -C "$src" add -A
+    if git -C "$src" diff --cached --quiet 2>/dev/null; then
+        log "Backup kasir-roti: tidak ada perubahan"
+        return 0
+    fi
+    git -C "$src" commit -qm "backup otomatis $(date '+%F %T')"
+    log "Backup kasir-roti: $(git -C "$src" log -1 --oneline)"
+    if git -C "$src" push -q origin HEAD:kasir-roti 2>/dev/null; then
+        log "Push kasir-roti ke GitHub OK"
+    else
+        warn "Push kasir-roti gagal → cek gh login"
+    fi
+}
+
+# =========================================================
 # 9. BACKUP SCRIPT INI SENDIRI
 # =========================================================
 # /root/setup.sh = symlink ke /root/mesin-setup/setup.sh (repo GitHub).
@@ -919,6 +980,11 @@ main() {
     install_chrome
     ensure_site
 
+    # GitHub login di SINI (bukan di bawah): agar klone repo privat (kasir-roti)
+    # bisa jalan SEBELUM supervisor conf-nya dibuat → satu run langsung onlen.
+    setup_gh
+    restore_kasir
+
     resolve_binaries
     write_supervisor_confs
 
@@ -964,10 +1030,10 @@ main() {
     capture_tunnel_url
     capture_kasir_url
 
-    setup_gh
     restore_site
     configure_git_identity
     backup_site
+    backup_kasir
     backup_setup
     start_dev_session
 
