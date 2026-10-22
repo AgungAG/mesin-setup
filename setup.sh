@@ -75,6 +75,7 @@ SUPERVISOR_DIR="/etc/supervisor/conf.d"
 SUPERVISOR_RUN="/var/run/supervisor.sock"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
 TUNNEL_URL_FILE="/root/cloudflared-url.txt"
+KASIR_URL_FILE="/root/kasir-url.txt"
 HANDOVER_LOG="/root/setup-takeover.log"
 
 TS_AUTHKEY="${TS_AUTHKEY:-}"
@@ -85,6 +86,7 @@ INSTALL_CHROME="${INSTALL_CHROME:-1}"
 # Hasil yang dicetak di ringkasan akhir
 SERVE_URL=""
 TUNNEL_URL=""
+KASIR_URL=""
 
 log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
@@ -579,8 +581,50 @@ stdout_logfile_maxbytes=10485760
 stdout_logfile_backups=3
 EOF
         log "Tunnel publik cloudflared ikut dipantau supervisor"
+
+        # kasir-roti (web kasir, port 8080) — opsional: hanya kalau binarinya ada.
+        # Kalau belum terpasang tapi ada hasil build di /root/kasir-roti, pasangkan dulu.
+        local kasir_bin="/usr/local/bin/kasir-roti"
+        if [ ! -x "$kasir_bin" ] && [ -x /root/kasir-roti/target/release/kasir-roti ]; then
+            install -m755 /root/kasir-roti/target/release/kasir-roti "$kasir_bin"
+        fi
+        if [ -x "$kasir_bin" ]; then
+            cat > "$SUPERVISOR_DIR/30-kasir.conf" <<EOF
+[program:kasir-roti]
+priority=25
+autostart=true
+autorestart=true
+command=${kasir_bin} --serve --port 8080
+startsecs=2
+stopsignal=TERM
+stopasgroup=true
+killasgroup=true
+redirect_stderr=true
+stdout_logfile=/var/log/kasir-roti.log
+stdout_logfile_maxbytes=1048576
+stdout_logfile_backups=1
+environment=HOME="/root",USER="root"
+EOF
+            cat > "$SUPERVISOR_DIR/35-kasir-cloudflared.conf" <<EOF
+[program:kasir-cloudflared]
+priority=35
+autostart=true
+autorestart=true
+command=${CLOUDFLARED_BIN} tunnel --url http://localhost:8080
+startsecs=5
+stopasgroup=true
+killasgroup=true
+redirect_stderr=true
+stdout_logfile=/var/log/kasir-cloudflared.log
+stdout_logfile_maxbytes=1048576
+stdout_logfile_backups=1
+EOF
+            log "Kasir web (port 8080) + tunnel kasir ikut dipantau supervisor"
+        else
+            rm -f "$SUPERVISOR_DIR/30-kasir.conf" "$SUPERVISOR_DIR/35-kasir-cloudflared.conf"
+        fi
     else
-        rm -f "$SUPERVISOR_DIR/20-cloudflared.conf"
+        rm -f "$SUPERVISOR_DIR/20-cloudflared.conf" "$SUPERVISOR_DIR/30-kasir.conf" "$SUPERVISOR_DIR/35-kasir-cloudflared.conf"
         log "Tunnel cloudflared dimatikan (USE_CLOUDFLARED=0)"
     fi
 }
@@ -676,6 +720,25 @@ capture_tunnel_url() {
         log "Tunnel publik: $url (juga disimpan di $TUNNEL_URL_FILE)"
     else
         warn "URL tunnel belum muncul → cek /var/log/cloudflared.log"
+    fi
+}
+
+# Tunnel kasir (port 8080): URL quick tunnel-nya beda dari site → file terpisah.
+capture_kasir_url() {
+    [ "$USE_CLOUDFLARED" = "1" ] || return 0
+    [ -f "$SUPERVISOR_DIR/30-kasir.conf" ] || return 0
+    local i url=""
+    for i in $(seq 30); do
+        url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /var/log/kasir-cloudflared.log 2>/dev/null | tail -1 || true)
+        [ -n "$url" ] && break
+        sleep 1
+    done
+    if [ -n "$url" ]; then
+        KASIR_URL="$url"
+        printf '%s\n' "$url" > "$KASIR_URL_FILE"
+        log "Kasir online: $url (juga disimpan di $KASIR_URL_FILE)"
+    else
+        warn "URL kasir belum muncul → cek /var/log/kasir-cloudflared.log"
     fi
 }
 
@@ -889,11 +952,17 @@ main() {
     start_service site-server "cd ${SITE_DIR} && nohup ${PY_BIN} -m http.server ${SITE_PORT} --bind 0.0.0.0 >/var/log/site-server.log 2>&1 &"
     if [ "$USE_CLOUDFLARED" = "1" ]; then
         start_service cloudflared "${CLOUDFLARED_BIN} tunnel --url http://localhost:${SITE_PORT}"
+        # kasir web: hanya kalau binarinya terpasang (conf 30-kasir.conf dibuat di atas)
+        if [ -x /usr/local/bin/kasir-roti ] && [ -f "$SUPERVISOR_DIR/30-kasir.conf" ]; then
+            start_service kasir-roti "/usr/local/bin/kasir-roti --serve --port 8080"
+            start_service kasir-cloudflared "${CLOUDFLARED_BIN} tunnel --url http://localhost:8080"
+        fi
     fi
 
     login_tailscale
     setup_serve
     capture_tunnel_url
+    capture_kasir_url
 
     setup_gh
     restore_site
@@ -921,6 +990,11 @@ summary() {
         echo "  Tunnel publik : $TUNNEL_URL"
     elif [ "$USE_CLOUDFLARED" = "1" ]; then
         echo "  Tunnel publik : $(cat "$TUNNEL_URL_FILE" 2>/dev/null || echo 'belum ada')"
+    fi
+    if [ -n "$KASIR_URL" ]; then
+        echo "  Kasir online  : $KASIR_URL"
+    elif [ -f "$KASIR_URL_FILE" ] && [ "$USE_CLOUDFLARED" = "1" ]; then
+        echo "  Kasir online  : $(cat "$KASIR_URL_FILE" 2>/dev/null || echo 'belum ada')"
     fi
     echo "  Web lokal     : http://localhost:${SITE_PORT}   (dir: ${SITE_DIR})"
     echo "  OpenCode      : $(command -v opencode 2>/dev/null || echo "$OPENCODE_DIR/opencode")"
