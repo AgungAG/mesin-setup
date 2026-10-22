@@ -120,13 +120,24 @@ fi
 # 0. SECRET
 # =========================================================
 # Supaya reset tidak bikin lupa token: simpan sekali, baca lagi.
+#
+# PENTING: nilai dari ENV harus MENANG atas isi file. File bisa berisi key lama
+# yang sudah expired/revoke, sementara user mungkin baru pass key BARU lewat
+# env (TS_AUTHKEY=... GH_TOKEN=... bash setup.sh). Tanpa penyimpanan ini,
+# `. "$SECRET_FILE"` menimpa env secara diam-diam → key baru tidak pernah
+# dipakai, dan malah tersimpan kembali sebagai key lama oleh save_secrets.
 load_secrets() {
-    [ -r "$SECRET_FILE" ] || return 0
-    set +u
-    # shellcheck source=/dev/null
-    . "$SECRET_FILE"
-    set -u
-    log "Secret dibaca dari $SECRET_FILE"
+    local env_ts="${TS_AUTHKEY:-}" env_gh="${GH_TOKEN:-}"
+    if [ -r "$SECRET_FILE" ]; then
+        set +u
+        # shellcheck source=/dev/null
+        . "$SECRET_FILE"
+        set -u
+        log "Secret dibaca dari $SECRET_FILE"
+    fi
+    # kembalikan nilai env (lebih baru) kalau tadi tertimpa file
+    if [ -n "$env_ts" ]; then TS_AUTHKEY="$env_ts"; fi
+    if [ -n "$env_gh" ]; then GH_TOKEN="$env_gh"; fi
 }
 
 save_secrets() {
@@ -300,24 +311,40 @@ login_tailscale() {
     done
     if ! tailscale status >/dev/null 2>&1; then
         warn "tailscaled belum siap → cek: supervisorctl status tailscaled dan /var/log/tailscaled.log"
-        return
+        warn "  (langkah berikutnya tetap dijalankan: GitHub/web tidak ikut berhenti)"
+        return 0
     fi
 
-    if ! tailscale status 2>/dev/null | grep -q 'Logged out'; then
-        log "Tailscale sudah login: $(tailscale ip -4 2>/dev/null || true)"
-    elif [ -n "$TS_AUTHKEY" ]; then
-        log "Login Tailscale pakai auth key (otomatis)..."
-        # --ssh supaya bisa masuk dari Termius; auth key noncesih node lama boleh hilang
-        tailscale up --auth-key="$TS_AUTHKEY" --ssh --accept-dns=false
-        sleep 2
+    if tailscale status 2>/dev/null | grep -q 'Logged out'; then
+        if [ -n "$TS_AUTHKEY" ]; then
+            log "Login Tailscale pakai auth key (otomatis)..."
+            # --ssh supaya bisa masuk dari Termius; auth key noncesih node lama boleh hilang
+            #
+            # Kegagalan di sini TIDAK boleh mematikan script (set -e): `tailscale up`
+            # bisa menolak kalau prefs lama berbeda ("requires mentioning all
+            # non-default flags") atau key sudah expired. Karena fungsi ini jalan
+            # SEBELUM setup_gh, satu failure = login GitHub/clone/push ikut batal.
+            # Jadi: coba dulu biasa, kalau ditolak karena prefs → ulangi dengan --reset.
+            if ! tailscale up --auth-key="$TS_AUTHKEY" --ssh --accept-dns=false; then
+                warn "tailscale up ditolak → coba ulang dengan --reset (prefs lama berbeda)"
+                if ! tailscale up --auth-key="$TS_AUTHKEY" --ssh --accept-dns=false --reset; then
+                    warn "Login Tailscale GAGAL → cek TS_AUTHKEY (expired/revoke?) dan /var/log/tailscaled.log"
+                    warn "  key baru: TS_AUTHKEY=tskey-auth-xxx bash $0"
+                    return 0
+                fi
+            fi
+            sleep 2
+        else
+            log "Login Tailscale — buka link ini di browser:"
+            echo
+            tailscale up --ssh || true
+            echo
+            warn "Setelah login di browser, jalankan lagi: bash $0"
+            warn "(atau set TS_AUTHKEY agar otomatis)"
+            return 0
+        fi
     else
-        log "Login Tailscale — buka link ini di browser:"
-        echo
-        tailscale up --ssh || true
-        echo
-        warn "Setelah login di browser, jalankan lagi: bash $0"
-        warn "(atau set TS_AUTHKEY agar otomatis)"
-        return
+        log "Tailscale sudah login: $(tailscale ip -4 2>/dev/null || true)"
     fi
 
     # pastikan Tailscale SSH tetap nyala (tersimpan di prefs, dicek ulang tiap run)
@@ -326,6 +353,7 @@ login_tailscale() {
         tailscale up --ssh --accept-dns=false || true
     fi
     log "IP Tailscale: $(tailscale ip -4 2>/dev/null || echo 'belum dapat')"
+    return 0
 }
 
 # URL tetap di tailnet — tidak berganti walau mesin di-restart.
@@ -626,12 +654,34 @@ capture_tunnel_url() {
 # =========================================================
 # 8. GITHUB + BACKUP TOKO ROTI
 # =========================================================
+# Cek login gh yang SEBENARNYA (credential tersimpan di hosts.yml), bukan yang
+# ditipu env. Selama script ini jalan, GH_TOKEN ada di env proses → `gh auth
+# status` otomatis pakai env token dan selalu bilang "sukses", padahal token
+# belum pernah disimpan ke /root/.config/gh/hosts.yml. Akibatnya blok
+# `gh auth login --with-token` DILEWATI, dan di shell berikutnya (tanpa env)
+# gh balik bilang "not logged in" — persis gejala yang dialami.
+# Jadi env token dibersihkan dulu saat menilai status.
+gh_auth_persisted() {
+    env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN \
+        gh auth status >/dev/null 2>&1
+}
+
 setup_gh() {
     command -v gh >/dev/null 2>&1 || return 0
-    if ! gh auth status >/dev/null 2>&1; then
+    if ! gh_auth_persisted; then
         if [ -n "$GH_TOKEN" ]; then
             log "GitHub login pakai GH_TOKEN..."
-            printf '%s' "$GH_TOKEN" | gh auth login --hostname github.com --git-protocol https --with-token
+            # printf (bukan echo) supaya token tidak dapat tambahan newline
+            if printf '%s' "$GH_TOKEN" | gh auth login --hostname github.com --git-protocol https --with-token; then
+                if gh_auth_persisted; then
+                    log "GitHub token TERSIMPAN persisten (tetap login walau env dilepas)"
+                else
+                    warn "gh menerima token tapi tidak tersimpan → GH_TOKEN mungkin tidak valid"
+                fi
+            else
+                warn "gh auth login GAGAL → cek GH_TOKEN (expired / scope kurang?)"
+                warn "  cek manual: GH_TOKEN=xxx gh auth status"
+            fi
         else
             warn "GitHub belum login → set GH_TOKEN lalu jalankan ulang: $0"
             return 0
@@ -640,6 +690,7 @@ setup_gh() {
     gh auth setup-git >/dev/null 2>&1 || true
     gh alias set co "pr checkout" >/dev/null 2>&1 || true
     log "GitHub login: $(gh api user -q .login 2>/dev/null || echo OK)"
+    return 0
 }
 
 configure_git_identity() {
