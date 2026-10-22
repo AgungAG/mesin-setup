@@ -329,19 +329,30 @@ install_tailscale() {
 }
 
 login_tailscale() {
-    # tailscaled dijalankan supervisor → tunggu socketnya siap dulu
-    local i
+    # tailscaled dijalankan supervisor → tunggu socketnya siap dulu.
+    # Pakai `debug prefs`, BUKAN `tailscale status`: saat masih logged-out,
+    # `status` bisa dihitung gagal (kelihatan "belum siap") ATAU teksnya
+    # tidak persis "Logged out" (ubah antar versi) → akibatnya blok authkey
+    # DILEWATI dan login otomatis tidak jalan. `debug prefs` tetap dibalaskan
+    # (exit 0) walau belum login, dan field JSON "LoggedOut"-nya pasti.
+    local i prefs
+    prefs=""
     for i in $(seq 1 20); do
-        tailscale status >/dev/null 2>&1 && break
+        prefs=$(tailscale debug prefs 2>/dev/null) && break
         sleep 1
     done
-    if ! tailscale status >/dev/null 2>&1; then
+    if [ -z "$prefs" ]; then
         warn "tailscaled belum siap → cek: supervisorctl status tailscaled dan /var/log/tailscaled.log"
         warn "  (langkah berikutnya tetap dijalankan: GitHub/web tidak ikut berhenti)"
         return 0
     fi
 
-    if tailscale status 2>/dev/null | grep -q 'Logged out'; then
+    # Sudah login atau belum dibaca dari prefs JSON — bukan dari teks
+    # human-readable yang bisa berganti kalimat antar versi.
+    local logged_out=false
+    printf '%s\n' "$prefs" | grep -q '"LoggedOut": *true' && logged_out=true
+
+    if [ "$logged_out" = true ]; then
         if [ -n "$TS_AUTHKEY" ]; then
             log "Login Tailscale pakai auth key (otomatis)..."
             # --ssh supaya bisa masuk dari Termius; auth key noncesih node lama boleh hilang
