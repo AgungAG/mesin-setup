@@ -5,9 +5,9 @@
 # Semua langkah IDEMPOTEN: boleh dijalankan berkali-kali, hasilnya tetap sama.
 #
 # Yang disetup:
-#   0. Repo Google Chrome : keyring + sources.list — jalan PALING AWAL,
-#                       sebelum apt update pertama (lihat "Kenapa duluan"
-#                       di fungsi ensure_google_chrome_repo)
+#   0. Repo Google Chrome : buang sisa keyring+sources.list lama, pasang ulang
+#                       — jalan PALING AWAL, sebelum apt update pertama
+#                       (lihat "Kenapa duluan" di ensure_google_chrome_repo)
 #   1. Paket dasar    : git, tmux, jq, curl, ca-certificates
 #                       + gh dari repo resmi GitHub CLI (cli.github.com)
 #   2. Google Chrome  : google-chrome-stable (bisa dimatikan: INSTALL_CHROME=0)
@@ -154,6 +154,30 @@ save_secrets() {
     else
         rm -f "$tmp"
     fi
+}
+
+# =========================================================
+# 0. BUANG SISA REPO GOOGLE CHROME LAMA — jalan PALING AWAL
+# =========================================================
+# Dilakukan SEBELUM ensure_google_chrome_repo. Keyring/list Chrome yang korup,
+# KUNCI LAWAS (Google pernah rotasi signing key → NO_PUBKEY), atau sisa dari
+# image bawaan dibuang dulu, lalu dipasang ulang segar oleh langkah berikutnya.
+# Ini pengganti dua command manual yang dulu diketik tiap kali bermasalah:
+#   sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+#   sudo rm -f /usr/share/keyrings/google-chrome.gpg
+#
+# Idempoten: kalau keduanya sudah tidak ada, tidak ada yang dihapus.
+# ($SUDO sengaja tidak di-quote: nilainya "" atau "sudo")
+# shellcheck disable=SC2086
+reset_google_chrome_repo() {
+    local keyring="/usr/share/keyrings/google-chrome.gpg"
+    local list="/etc/apt/sources.list.d/google-chrome.list"
+
+    if [ ! -e "$keyring" ] && [ ! -e "$list" ]; then
+        return 0
+    fi
+    log "Buang repo/keyring Chrome lama → dipasang ulang segar..."
+    $SUDO rm -f "$list" "$keyring"
 }
 
 # =========================================================
@@ -383,6 +407,10 @@ install_opencode() {
     # Pastikan ada di PATH lewat .bashrc (aman kalau .bashrc ikut hilang kena reset)
     if ! grep -q '.opencode/bin' /root/.bashrc 2>/dev/null; then
         printf '\n# opencode\nexport PATH=/root/.opencode/bin:$PATH\n' >> /root/.bashrc
+    fi
+    # Alias singkat: oce = opencode. Ditulis sekali, dicek ulang tiap run.
+    if ! grep -q "alias oce=" /root/.bashrc 2>/dev/null; then
+        printf "\n# alias opencode\nalias oce='opencode'\n" >> /root/.bashrc
     fi
     export PATH="$OPENCODE_DIR:$PATH"
     log "OpenCode: $(command -v opencode || echo "$OPENCODE_DIR/opencode")"
@@ -815,7 +843,9 @@ start_dev_session() {
 main() {
     load_secrets
 
-    # PALING AWAL — kalau dilewat, apt update pertama bisa gagal NO_PUBKEY.
+    # PALING AWAL — buang sisa Chrome lama dulu, baru dipasang ulang.
+    # Kalau dilewat, apt update pertama bisa gagal NO_PUBKEY.
+    reset_google_chrome_repo
     ensure_google_chrome_repo
     install_packages
     install_gh
