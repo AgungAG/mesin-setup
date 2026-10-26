@@ -12,16 +12,22 @@
 #                              GitHub dulu.
 #   2) apt update + gh + opencode + Brave + upterm
 #                           → `bash setup.sh tools` (mode ringan): refresh
-#                              repo lalu pasang gh, opencode, Brave, upterm.
-#                              Tidak menyentuh service/supervisor → aman
-#                              kapan saja.
+#                              repo lalu pasang gh, opencode, Brave, upterm,
+#                              + setup bot Telegram (config + supervisor).
+#                              Tidak menyentuh service/supervisor lain →
+#                              aman kapan saja.
 #   3) Generate SSH         → upterm host --accept -- bash. Begitu command
 #                              SSH tercetak, OTOMATIS disalin ke clipboard
 #                              (OSC 52 ke terminal + xclip di desktop VNC)
 #                              dan disimpan ke /root/upterm-ssh.txt → tinggal
 #                              paste di mesin lain. Sesi mati kalau host-nya
 #                              keluar.
-#   4) Keluar
+#   4) List sesi upterm     → tampilkan sesi upterm yang sedang berjalan
+#                              (nama, status, ID, jumlah tamu).
+#   5) Stop semua sesi      → hentikan SEMUA sesi upterm yang aktif (ada
+#         upterm              konfirmasi dulu; sesi terminal ini sendiri bisa
+#                              ikut terputus kalau terminalnya join via upterm).
+#   6) Keluar
 #
 # Pemakaian:
 #   bash /root/menu.sh        (jalur pendek; symlink ke mesin-setup/menu.sh)
@@ -101,7 +107,8 @@ install_all() {
 }
 
 # --- Opsi 2 ------------------------------------------------------------
-# Mode ringan setup.sh: apt update + Brave + upterm. Tanpa setup penuh.
+# Mode ringan setup.sh: apt update + Brave + upterm + bot Telegram.
+# Tanpa setup penuh.
 install_tools() {
     ensure_setup_sh || return 0
     laporkan_status bash "$SETUP_SH" tools
@@ -192,6 +199,97 @@ host_session() {
     return 0
 }
 
+# --- Opsi 4 & 5: sesi upterm -------------------------------------------
+# Ambil baris "nama<TAB>session-id" untuk tiap sesi upterm yang berjalan.
+# JSON-nya di-parse python3 (selalu ada di image ini) dengan cadangan jq —
+# parsing tabel teks rawan pecah kalau format CLI upterm berubah.
+upterm_session_pairs() {
+    local json
+    json=$(upterm session list -o json 2>/dev/null) || return 1
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$json" | python3 -c 'import json,sys
+for s in json.load(sys.stdin):
+    print("%s\t%s" % (s.get("name","?"), s.get("sessionId","?")))'
+    elif command -v jq >/dev/null 2>&1; then
+        printf '%s' "$json" | jq -r '.[] | "\(.name)\t\(.sessionId)"'
+    else
+        return 1
+    fi
+}
+
+# --- Opsi 4 ------------------------------------------------------------
+list_sessions() {
+    if ! command -v upterm >/dev/null 2>&1; then
+        warn "upterm belum terinstall → jalankan opsi 1 atau 2 dulu"
+        return 0
+    fi
+    local out rc=0 n=0
+    out=$(upterm session list 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        warn "upterm session list gagal: $out"
+        return 0
+    fi
+    printf '%s\n' "$out"
+    n=$(upterm_session_pairs 2>/dev/null | grep -c . || true)
+    if [ "${n:-0}" -eq 0 ]; then
+        log "Tidak ada sesi upterm yang berjalan"
+    else
+        log "$n sesi berjalan — detail: upterm session info <nama>   (stop: opsi 5)"
+    fi
+    return 0
+}
+
+# --- Opsi 5 ------------------------------------------------------------
+# Hentikan semua sesi upterm. Sengaja minta konfirmasi: kalau terminal INI
+# sendiri join lewat upterm (opsi 3), sesi sendiri ikut mati → koneksi putus.
+stop_sessions() {
+    if ! command -v upterm >/dev/null 2>&1; then
+        warn "upterm belum terinstall → jalankan opsi 1 atau 2 dulu"
+        return 0
+    fi
+    local pairs n=0 name id stopped=0 failed=0 cur="" jawab=""
+    if ! pairs=$(upterm_session_pairs 2>/dev/null); then
+        warn "daftar sesi tidak bisa dibaca (butuh python3/jq) → tidak ada yang dihentikan"
+        return 0
+    fi
+    n=$(printf '%s\n' "$pairs" | grep -c . || true)
+    if [ "${n:-0}" -eq 0 ]; then
+        log "Tidak ada sesi upterm yang berjalan"
+        return 0
+    fi
+
+    echo "Sesi yang akan dihentikan:"
+    printf '%s\n' "$pairs" | awk -F'\t' '{printf "  • %s  (%s)\n", $1, $2}'
+
+    # 'upterm session current' sukses kalau terminal ini sendiri ada di dalam
+    # sesi upterm → peringatan sebelum user menjawab y.
+    cur=$(upterm session current 2>/dev/null | awk '/^Session:/{print $2; exit}' || true)
+    if [ -n "$cur" ] && printf '%s\n' "$pairs" | grep -Fq "$cur"; then
+        warn "Terminal INI sendiri ada di sesi di atas → koneksi bisa TERPUTUS"
+    fi
+
+    read -r -p "  Hentikan semua sesi di atas? [y/N] " jawab || jawab=""
+    case "$jawab" in
+        y|Y|ya|Ya|YA) ;;
+        *) log "Dibatalkan — tidak ada sesi yang dihentikan"; return 0 ;;
+    esac
+
+    while IFS=$'\t' read -r name id; do
+        [ -n "$id" ] || continue
+        if upterm session stop "$id" >/dev/null 2>&1; then
+            log "Dihentikan: $name ($id)"
+            stopped=$((stopped + 1))
+        else
+            warn "Gagal menghentikan: $name ($id)"
+            failed=$((failed + 1))
+        fi
+    done <<EOF
+$pairs
+EOF
+    log "Selesai: $stopped dihentikan, $failed gagal"
+    return 0
+}
+
 # --- Menu --------------------------------------------------------------
 while true; do
     cat <<'EOF'
@@ -199,16 +297,21 @@ while true; do
   +-- mesin-setup ----------------------------------+
   |  1) Install keseluruhan (setup.sh)              |
   |  2) apt update + gh + opencode + Brave + upterm |
+  |     (+ bot Telegram)                            |
   |  3) Generate SSH (upterm) + copy clipboard      |
-  |  4) Keluar                                      |
+  |  4) List sesi upterm yang aktif                  |
+  |  5) Stop semua sesi upterm aktif                 |
+  |  6) Keluar                                      |
   +-------------------------------------------------+
 EOF
-    read -r -p "  Pilih [1-4]: " pilih || { echo; pilih=4; }
+    read -r -p "  Pilih [1-6]: " pilih || { echo; pilih=6; }
     case "$pilih" in
         1)      install_all ;;
         2)      install_tools ;;
         3)      host_session ;;
-        4|q|Q)  log "Keluar."; exit 0 ;;
-        *)      warn "Pilihan tidak dikenal: '$pilih' (pakai 1/2/3/4)" ;;
+        4)      list_sessions ;;
+        5)      stop_sessions ;;
+        6|q|Q)  log "Keluar."; exit 0 ;;
+        *)      warn "Pilihan tidak dikenal: '$pilih' (pakai 1/2/3/4/5/6)" ;;
     esac
 done

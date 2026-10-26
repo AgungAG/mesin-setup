@@ -43,9 +43,11 @@
 # Pemakaian:
 #   bash setup.sh               Setup penuh dari nol.
 #   bash setup.sh tools         Mode ringan: apt update + install gh, opencode,
-#                               Brave, upterm — tanpa menyentuh
-#                               service/supervisor (dipakai menu.sh opsi 2).
-#   Menu interaktif (install / mode tools / generate SSH / keluar):
+#                               Brave, upterm + setup bot Telegram (conf
+#                               supervisor & start bot-nya saja — service lain
+#                               tidak disentuh). Dipakai menu.sh opsi 2.
+#   Menu interaktif (install / mode tools / generate SSH / list & stop sesi
+#   upterm / keluar):
 #     bash /root/menu.sh
 #
 # RESTORE DARI NOL (mesin baru / habis reset, /root sudah bersih):
@@ -1315,11 +1317,11 @@ main() {
     load_secrets
 
     # Mode ringan `tools` (menu.sh opsi 2): cukup apt update + gh + opencode
-    # + Brave + upterm. Sengaja berhenti DI SINI — tidak menyentuh
-    # supervisor/service/login, jadi aman dijalankan kapan saja tanpa memutus
-    # sesi yang sedang jalan.
+    # + Brave + upterm + setup bot Telegram. Sengaja berhenti DI SINI — tidak
+    # menyentuh service/supervisor LAIN (kecuali conf+start bot Telegram),
+    # jadi aman dijalankan kapan saja tanpa memutus sesi yang sedang jalan.
     if [ "${1:-}" = "tools" ]; then
-        log "Mode tools: apt update + gh + opencode + Brave + upterm (tanpa setup penuh)"
+        log "Mode tools: apt update + gh + opencode + Brave + upterm + bot Telegram (tanpa setup penuh)"
         reset_google_chrome_repo
         ensure_google_chrome_repo
         apt_update
@@ -1327,6 +1329,14 @@ main() {
         install_brave
         install_upterm
         install_opencode
+        # Bot Telegram: tulis conf + terapkan LEWAT supervisor (reread/update
+        # hanya menyentuh conf yang berubah) + start bot-nya saja.
+        setup_telegram_bot
+        if [ -f "$SUPERVISOR_DIR/30-tgbot.conf" ] && [ -S "$SUPERVISOR_RUN" ]; then
+            supervisorctl reread >/dev/null 2>&1 || true
+            supervisorctl update >/dev/null 2>&1 || true
+            start_service tg-opencode-bot
+        fi
         log "Mode tools selesai"
         return 0
     fi

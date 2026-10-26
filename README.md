@@ -116,9 +116,11 @@ bash /root/menu.sh
 | Opsi | Isi |
 |---|---|
 | 1 | **Install keseluruhan** → jalankan `setup.sh` penuh (pulihkan mesin dari nol) |
-| 2 | **apt update + gh + opencode + Brave + upterm** → `bash setup.sh tools` (mode ringan, tanpa menyentuh service/supervisor) |
+| 2 | **apt update + gh + opencode + Brave + upterm + bot Telegram** → `bash setup.sh tools` (mode ringan; supervisor hanya untuk conf/start bot — service lain tidak disentuh) |
 | 3 | **Generate SSH** → `upterm host --accept -- bash` — begitu command SSH tercetak, **otomatis disalin ke clipboard** (OSC 52 + `xclip`) dan disimpan di `/root/upterm-ssh.txt`, jadi tinggal paste di mesin lain (sesi mati sendiri kalau host-nya keluar) |
-| 4 | **Keluar** |
+| 4 | **List sesi upterm aktif** → `upterm session list` (nama, status, ID, jumlah tamu) |
+| 5 | **Stop semua sesi upterm aktif** → hentikan semua sesi yang berjalan, dengan konfirmasi dulu (peringatan kalau terminal Anda sendiri ikut di sesi itu) |
+| 6 | **Keluar** |
 
 Mode tools juga bisa dipanggil langsung tanpa menu:
 
