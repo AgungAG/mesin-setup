@@ -97,14 +97,29 @@ ensure_setup_sh() {
 install_all() {
     ensure_setup_sh || return 0
     log "Install keseluruhan: bash $SETUP_SH"
-    bash "$SETUP_SH"
+    laporkan_status bash "$SETUP_SH"
 }
 
 # --- Opsi 2 ------------------------------------------------------------
 # Mode ringan setup.sh: apt update + Brave + upterm. Tanpa setup penuh.
 install_tools() {
     ensure_setup_sh || return 0
-    bash "$SETUP_SH" tools
+    laporkan_status bash "$SETUP_SH" tools
+}
+
+# Jalankan setup.sh lalu TAMPILKAN kalau dia berhenti dengan status gagal.
+# Dulu statusnya dibuang begitu saja → langkah yang gagal (mis. install Brave)
+# cuma meninggalkan satu baris warning yang tenggelam di antara log panjang.
+laporkan_status() {
+    local rc=0
+    "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        warn "setup.sh berhenti dengan status $rc → baca pesan error/warning di atas"
+        warn "  jalankan ulang: bash $SETUP_SH ${2:-}"
+    else
+        log "Selesai tanpa error (status 0)"
+    fi
+    return 0
 }
 
 # --- Opsi 3 ------------------------------------------------------------

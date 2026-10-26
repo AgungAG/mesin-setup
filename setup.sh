@@ -264,6 +264,8 @@ ensure_google_chrome_repo() {
 # =========================================================
 # 1. PAKET DASAR
 # =========================================================
+# ($SUDO sengaja tidak di-quote: nilainya "" atau "sudo")
+# shellcheck disable=SC2086
 install_packages() {
     local need=() p
     # xclip: buat fitur copy-ke-clipboard di menu.sh opsi 3 (aktif kalau ada
@@ -277,7 +279,9 @@ install_packages() {
     fi
     log "Install paket: ${need[*]}"
     apt_update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${need[@]}"
+    # $SUDO WAJIB: script ini sering dijalankan sebagai user biasa (menu.sh dari
+    # home user) → tanpa sudo apt langsung "Permission denied" pada lock file.
+    DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y "${need[@]}"
 }
 
 # gh dipasang dari repo resmi GitHub CLI (cli.github.com), bukan paket Debian
@@ -316,6 +320,8 @@ install_gh() {
 # =========================================================
 # Chrome dari repo resmi Google (sudah dipasang di langkah 0), bukan file .deb
 # manual. Idempoten: kalau sudah terinstall, dilewati.
+# ($SUDO sengaja tidak di-quote: nilainya "" atau "sudo")
+# shellcheck disable=SC2086
 install_chrome() {
     if [ "$INSTALL_CHROME" != "1" ]; then
         log "Install Chrome dimatikan (INSTALL_CHROME=0)"
@@ -327,7 +333,7 @@ install_chrome() {
     fi
     log "Install google-chrome-stable..."
     apt_update
-    if DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable; then
+    if DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y google-chrome-stable; then
         log "Google Chrome terpasang ($(command -v google-chrome-stable || echo '/usr/bin/google-chrome'))"
     else
         warn "Install Chrome gagal → cek koneksi ke dl.google.com, lalu jalankan ulang:"
@@ -365,8 +371,12 @@ ensure_brave_repo() {
     log "Siapkan repo Brave..."
     $SUDO mkdir -p /usr/share/keyrings /etc/apt/sources.list.d
 
+    # Dibuat SEKALI di sini, dipakai oleh dua blok download (key + sources).
+    # Kalau `tmp` dibiarkan kosong, redirect `> "$tmp"` gagal "ambiguous
+    # redirect" dan source Brave tidak pernah terpasang.
+    tmp=$(mktemp)
+
     if [ ! -s "$keyring" ]; then
-        tmp=$(mktemp)
         if fetch_url "$key_url" > "$tmp" && [ -s "$tmp" ]; then
             $SUDO install -m 644 "$tmp" "$keyring"
             log "Keyring Brave → $keyring"
@@ -428,6 +438,8 @@ EOF
     log "Wrapper Brave (--no-sandbox) → /usr/local/bin/brave"
 }
 
+# ($SUDO sengaja tidak di-quote: nilainya "" atau "sudo")
+# shellcheck disable=SC2086
 install_brave() {
     if [ "$INSTALL_BRAVE" = "1" ]; then
         if dpkg -s brave-browser >/dev/null 2>&1; then
@@ -435,10 +447,17 @@ install_brave() {
         elif ensure_brave_repo; then
             log "Install brave-browser..."
             apt_update
-            if DEBIAN_FRONTEND=noninteractive apt-get install -y brave-browser; then
+            # $SUDO wajib — tanpa ini, kalau menu.sh dijalankan sebagai user
+            # biasa, apt berhenti di "Could not open lock file ... Permission
+            # denied" dan Brave tidak pernah terpasang (lihat install_gh/upterm
+            # yang sudah benar memakai $SUDO).
+            if DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y brave-browser; then
                 log "Brave terpasang ($(command -v brave-browser || echo '/usr/bin/brave-browser'))"
             else
-                warn "Install Brave gagal → cek koneksi ke brave-browser-apt-release.s3.brave.com"
+                warn "Install Brave gagal → cek pesan apt di atas"
+                warn "  (umumnya koneksi ke brave-browser-apt-release.s3.brave.com,"
+                warn "   atau lock apt → cek: sudo lsof /var/lib/dpkg/lock-frontend)"
+                warn "  ulangi: sudo apt-get update && sudo apt-get install -y brave-browser"
             fi
         fi
     else
@@ -583,20 +602,30 @@ setup_serve() {
 # =========================================================
 # 4. OPENCODE
 # =========================================================
+# ($SUDO sengaja tidak di-quote: nilainya "" atau "sudo")
+# shellcheck disable=SC2086
 install_opencode() {
-    if [ -x "$OPENCODE_DIR/opencode" ]; then
-        log "OpenCode sudah terinstall ($("$OPENCODE_DIR/opencode" --version 2>/dev/null))"
+    local oc_bin="$OPENCODE_DIR/opencode"
+    # Dir sebagai root → /root/.opencode/bin; dijalankan sebagai user lain,
+    # instalernya pakai $HOME. Cek dua-duanya biar tidak unduh ulang tiap run.
+    [ -x "$oc_bin" ] || oc_bin="${HOME:-/root}/.opencode/bin/opencode"
+    if [ -x "$oc_bin" ]; then
+        log "OpenCode sudah terinstall ($("$oc_bin" --version 2>/dev/null))"
     else
         log "Install OpenCode..."
         curl -fsSL https://opencode.ai/v2/install | bash
     fi
-    # Pastikan ada di PATH lewat .bashrc (aman kalau .bashrc ikut hilang kena reset)
-    if ! grep -q '.opencode/bin' /root/.bashrc 2>/dev/null; then
-        printf '\n# opencode\nexport PATH=/root/.opencode/bin:$PATH\n' >> /root/.bashrc
+    # Pastikan ada di PATH lewat .bashrc (aman kalau .bashrc ikut hilang kena reset).
+    # $SUDO wajib: /root/.bashrc tidak bisa ditulis user biasa → tanpa ini
+    # `set -e` mematikan SELURUH script di sini (Mode tools tidak pernah selesai).
+    if ! $SUDO grep -q '.opencode/bin' /root/.bashrc 2>/dev/null; then
+        printf '\n# opencode\nexport PATH=/root/.opencode/bin:$PATH\n' \
+            | $SUDO tee -a /root/.bashrc >/dev/null
     fi
     # Alias singkat: oce = opencode. Ditulis sekali, dicek ulang tiap run.
-    if ! grep -q "alias oce=" /root/.bashrc 2>/dev/null; then
-        printf "\n# alias opencode\nalias oce='opencode'\n" >> /root/.bashrc
+    if ! $SUDO grep -q "alias oce=" /root/.bashrc 2>/dev/null; then
+        printf "\n# alias opencode\nalias oce='opencode'\n" \
+            | $SUDO tee -a /root/.bashrc >/dev/null
     fi
     export PATH="$OPENCODE_DIR:$PATH"
     log "OpenCode: $(command -v opencode || echo "$OPENCODE_DIR/opencode")"
@@ -615,13 +644,15 @@ install_opencode() {
 #
 # Kalau suatu saat butuh sshd (misal Tailscale mati total):
 #   apt-get install -y openssh-server
+# ($SUDO sengaja tidak di-quote: nilainya "" atau "sudo")
+# shellcheck disable=SC2086
 remove_sshd() {
     if dpkg -s openssh-server >/dev/null 2>&1 || command -v sshd >/dev/null 2>&1; then
         log "Hapus openssh-server (sshd tidak dipakai: akses lewat Tailscale SSH)..."
         supervisorctl stop sshd >/dev/null 2>&1 || true
         pkill -x sshd 2>/dev/null || true
         wait_gone -x sshd
-        DEBIAN_FRONTEND=noninteractive apt-get purge -y openssh-server >/dev/null 2>&1 \
+        DEBIAN_FRONTEND=noninteractive $SUDO apt-get purge -y openssh-server >/dev/null 2>&1 \
             || warn "purge openssh-server gagal → cek: apt-get install -f"
     fi
 
