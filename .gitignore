@@ -1,0 +1,6 @@
+# RAHASIA & runtime — jangan pernah masuk GitHub (repo ini publik)
+bot-telegram/config.json
+bot-telegram/state.json
+bot-telegram/*.log
+__pycache__/
+*.pyc

@@ -24,6 +24,10 @@
 #   6. Web toko roti  : http.server :8000 di /root/toko-roti
 #   7. Akses online   : tailscale serve (URL tetap) + tunnel cloudflared (opsional)
 #   8. GitHub         : gh login dari GH_TOKEN, identitas git, auto-commit toko-roti
+#   9. Bot Telegram   : bot AI (@..._bot) → model gratis OpenCode, dijaga
+#                       supervisor (30-tgbot.conf). bot.py disimpan sebagai
+#                       kode BERSIH di repo ini; rahasia TIDAK ikut ke GitHub —
+#                       token/chat id dibuat lokal dari env / .machine-secrets.
 #
 # CARA KERJA PENTING:
 #   tailscaled, web server, dan tunnel dijaga SUPERVISORD — yang memang
@@ -65,6 +69,12 @@
 #                               `brave` (--no-sandbox) tetap dibuat kalau binary
 #                               sudah ada dari install sebelumnya.
 #   SITE_REPO=AgungAG/toko-roti Repo tujuan push backup toko-roti.
+#   TG_BOT_TOKEN=12345:AA... Token bot Telegram (dari @BotFather) — RAHASIA,
+#                               jangan taruh di GitHub. Simpan juga ke
+#                               /root/.machine-secrets biar ikut pulih tiap reset.
+#   TG_CHAT_IDS=123456789     Chat ID yang diizinkan pakai bot (pisah koma/spasi).
+#                               Ambil ID: kirim /start ke bot, balasannya
+#                               memuat "ID Anda: <angka>".
 #   SITE_PORT=8000              Port web toko roti (default 8000).
 #   USE_CLOUDFLARED=0           Matikan tunnel publik (default: 1 = aktif).
 #   TAKE_TAILSCALE=0            Tunda ambil-alih tailscaled ke supervisor.
@@ -100,6 +110,15 @@ SITE_REPO="${SITE_REPO:-AgungAG/toko-roti}"
 INSTALL_CHROME="${INSTALL_CHROME:-1}"
 INSTALL_BRAVE="${INSTALL_BRAVE:-1}"
 UPTERM_BIN="/usr/local/bin/upterm"
+
+# Bot Telegram — rahasia dibaca dari env atau $SECRET_FILE (bukan dari repo)
+TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
+TG_CHAT_IDS="${TG_CHAT_IDS:-}"
+TG_BOT_DIR="/root/tg-opencode-bot"
+# Tempat bot.py di repo ini (script biasanya dijalankan lewat symlink
+# /root/setup.sh → resolve dulu biar ketemu repo-nya)
+TG_BOT_SRC="$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")/bot-telegram"
+TG_BOT_RAW="https://raw.githubusercontent.com/AgungAG/mesin-setup/main/bot-telegram/bot.py"
 
 # Hasil yang dicetak di ringkasan akhir
 SERVE_URL=""
@@ -148,6 +167,7 @@ fi
 # dipakai, dan malah tersimpan kembali sebagai key lama oleh save_secrets.
 load_secrets() {
     local env_ts="${TS_AUTHKEY:-}" env_gh="${GH_TOKEN:-}"
+    local env_tg="${TG_BOT_TOKEN:-}" env_tgc="${TG_CHAT_IDS:-}"
     if [ -r "$SECRET_FILE" ]; then
         set +u
         # shellcheck source=/dev/null
@@ -158,12 +178,14 @@ load_secrets() {
     # kembalikan nilai env (lebih baru) kalau tadi tertimpa file
     if [ -n "$env_ts" ]; then TS_AUTHKEY="$env_ts"; fi
     if [ -n "$env_gh" ]; then GH_TOKEN="$env_gh"; fi
+    if [ -n "$env_tg" ]; then TG_BOT_TOKEN="$env_tg"; fi
+    if [ -n "$env_tgc" ]; then TG_CHAT_IDS="$env_tgc"; fi
 }
 
 save_secrets() {
     local tmp="${SECRET_FILE}.tmp" var val
     : > "$tmp"
-    for var in TS_AUTHKEY GH_TOKEN; do
+    for var in TS_AUTHKEY GH_TOKEN TG_BOT_TOKEN TG_CHAT_IDS; do
         val="${!var:-}"
         [ -n "$val" ] || continue
         printf '%s=%q\n' "$var" "$val" >> "$tmp"
@@ -1114,6 +1136,104 @@ backup_kasir() {
 }
 
 # =========================================================
+# 8b. BOT TELEGRAM → OPENCODE (MODEL GRATIS)
+# =========================================================
+# Pisahkan kode dan rahasia:
+#   - bot.py → kode BERSIH, disimpan di repo publik ini (restore: git clone).
+#   - token + chat id → RAHASIA, dibuat lokal oleh fungsi ini dari env /
+#     $SECRET_FILE. config.json dihasilkan ulang tiap run (chmod 600),
+#     jadi isi rahasia selalu mengikuti .machine-secrets.
+# Idempoten: dijalankan berkali-kali hasilnya sama; kalau token kosong,
+# conf supervisor bot dibuang supaya tidak crash-loop.
+setup_telegram_bot() {
+    local conf="$TG_BOT_DIR/config.json"
+    local py="${PY_BIN:-$(command -v python3 || echo /usr/bin/python3)}"
+
+    if [ -z "$TG_BOT_TOKEN" ]; then
+        warn "TG_BOT_TOKEN kosong → bot Telegram dilewati"
+        warn "  isi dulu (env atau $SECRET_FILE):"
+        warn "      TG_BOT_TOKEN=12345:AA... TG_CHAT_IDS=<chatid> bash $0"
+        rm -f "$SUPERVISOR_DIR/30-tgbot.conf"
+        return 0
+    fi
+    [ -n "$TG_CHAT_IDS" ] \
+        || warn "TG_CHAT_IDS kosong → bot menolak SEMUA chat (aman, belum ada yang bisa pakai)"
+
+    mkdir -p "$TG_BOT_DIR"
+
+    # bot.py: ambil dari repo; kalau script dijalankan dari file curl tanpa
+    # repo, unduh dari raw.githubusercontent (tetap tanpa rahasia di dalamnya).
+    if [ -f "$TG_BOT_SRC/bot.py" ]; then
+        install -m 644 "$TG_BOT_SRC/bot.py" "$TG_BOT_DIR/bot.py"
+    elif [ ! -f "$TG_BOT_DIR/bot.py" ]; then
+        if fetch_url "$TG_BOT_RAW" > "$TG_BOT_DIR/bot.py" 2>/dev/null \
+            && [ -s "$TG_BOT_DIR/bot.py" ]; then
+            log "bot.py diunduh dari GitHub"
+        else
+            rm -f "$TG_BOT_DIR/bot.py" "$SUPERVISOR_DIR/30-tgbot.conf"
+            warn "bot.py tidak tersedia (offline / belum ada di repo) → bot Telegram dilewati"
+            return 0
+        fi
+    fi
+
+    # config.json = RAHASIA → ditulis lokal dari env/.machine-secrets, chmod 600.
+    TG_BOT_TOKEN="$TG_BOT_TOKEN" TG_CHAT_IDS="$TG_CHAT_IDS" "$py" - "$conf" <<'PYEOF'
+import json, os, sys
+secrets = os.environ.get("TG_CHAT_IDS", "")
+chats = [int(x) for x in secrets.replace(",", " ").split() if x.isdigit()]
+cfg = {
+    "token": os.environ["TG_BOT_TOKEN"],
+    "opencode_url": "http://127.0.0.1:49374",
+    "model": {"providerID": "opencode", "id": "mimo-v2.6-flash-free"},
+    "workdir": "/root",
+    "allowed_chat_ids": chats,
+    "prompt_timeout": 600,
+    "poll_timeout": 50,
+}
+with open(sys.argv[1], "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PYEOF
+    chmod 600 "$conf"
+    log "config bot Telegram ditulis ulang → $conf (chmod 600, dari .machine-secrets)"
+
+    # Permission OpenCode: tanpa ini sesi bot bisa macet nunggu konfirmasi
+    # tool (edit/bash). Hanya dibuat kalau belum ada — config user tidak ditimpa.
+    local oc_cfg="/root/.config/opencode/opencode.json"
+    if [ ! -f "$oc_cfg" ]; then
+        mkdir -p "$(dirname "$oc_cfg")"
+        cat > "$oc_cfg" <<'OCEOF'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": { "edit": "allow", "bash": "allow", "webfetch": "allow" }
+}
+OCEOF
+        log "permission OpenCode → allow (biar bot tidak nunggu konfirmasi tool)"
+    fi
+
+    # Supervisor: bot ikut bangun sendiri tiap container hidup.
+    cat > "$SUPERVISOR_DIR/30-tgbot.conf" <<EOF
+; Dibuat otomatis oleh setup.sh (di-regenerate tiap setup dijalankan).
+[program:tg-opencode-bot]
+priority=40
+autostart=true
+autorestart=true
+directory=${TG_BOT_DIR}
+command=${py} -u ${TG_BOT_DIR}/bot.py
+startsecs=3
+stopasgroup=true
+killasgroup=true
+redirect_stderr=true
+stdout_logfile=/var/log/tg-opencode-bot.log
+stdout_logfile_maxbytes=2097152
+stdout_logfile_backups=2
+environment=HOME="/root",USER="root"
+EOF
+    log "Bot Telegram dijaga supervisor (30-tgbot.conf) → log: /var/log/tg-opencode-bot.log"
+    return 0
+}
+
+# =========================================================
 # 9. BACKUP SCRIPT INI SENDIRI
 # =========================================================
 # /root/setup.sh = symlink ke /root/mesin-setup/setup.sh (repo GitHub), dan
@@ -1163,6 +1283,7 @@ backup_setup() {
     command -v git >/dev/null 2>&1 || return 0
     [ -e "$dir/.git" ] || return 0
     git -C "$dir" add setup.sh menu.sh
+    [ ! -d "$dir/bot-telegram" ] || git -C "$dir" add bot-telegram .gitignore
     if git -C "$dir" diff --cached --quiet 2>/dev/null; then
         log "Backup setup.sh: tidak ada perubahan"
     else
@@ -1229,6 +1350,7 @@ main() {
     # bisa jalan SEBELUM supervisor conf-nya dibuat → satu run langsung onlen.
     setup_gh
     restore_kasir
+    setup_telegram_bot
 
     resolve_binaries
     write_supervisor_confs
@@ -1261,6 +1383,10 @@ main() {
     fi
 
     start_service site-server "cd ${SITE_DIR} && nohup ${PY_BIN} -m http.server ${SITE_PORT} --bind 0.0.0.0 >/var/log/site-server.log 2>&1 &"
+    # bot Telegram: hanya kalau conf-nya ada (token kosong → conf dibuang di atas)
+    if [ -f "$SUPERVISOR_DIR/30-tgbot.conf" ]; then
+        start_service tg-opencode-bot
+    fi
     if [ "$USE_CLOUDFLARED" = "1" ]; then
         start_service cloudflared "${CLOUDFLARED_BIN} tunnel --url http://localhost:${SITE_PORT}"
         # kasir web: hanya kalau binarinya terpasang (conf 30-kasir.conf dibuat di atas)
@@ -1309,6 +1435,9 @@ summary() {
     fi
     echo "  Web lokal     : http://localhost:${SITE_PORT}   (dir: ${SITE_DIR})"
     echo "  OpenCode      : $(command -v opencode 2>/dev/null || echo "$OPENCODE_DIR/opencode")"
+    if [ -f "$SUPERVISOR_DIR/30-tgbot.conf" ] && [ -n "$TG_BOT_TOKEN" ]; then
+        echo "  Bot Telegram  : $(grep -o 'directory=.*' "$SUPERVISOR_DIR/30-tgbot.conf" | cut -d= -f2)  (chat id: ${TG_CHAT_IDS:-belum ada})"
+    fi
     echo "  Brave         : brave  (wrapper otomatis --no-sandbox; asli: /usr/bin/brave-browser)"
     echo "  Upterm        : $(command -v upterm 2>/dev/null || echo "$UPTERM_BIN")  → menu: bash /root/menu.sh (opsi 2)"
     echo "  SSH           : tailscale ssh root@${ts_ip}  (tanpa password; dari Termius/HP)"
