@@ -1282,7 +1282,7 @@ backup_setup() {
     local dir="/root/mesin-setup"
     command -v git >/dev/null 2>&1 || return 0
     [ -e "$dir/.git" ] || return 0
-    git -C "$dir" add setup.sh menu.sh
+    git -C "$dir" add setup.sh menu.sh README.md
     [ ! -d "$dir/bot-telegram" ] || git -C "$dir" add bot-telegram .gitignore
     if git -C "$dir" diff --cached --quiet 2>/dev/null; then
         log "Backup setup.sh: tidak ada perubahan"

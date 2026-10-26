@@ -41,6 +41,8 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 | `INSTALL_CHROME` | `0` = lewati install `google-chrome-stable` (default `1`; repo Chrome tetap dipasang) |
 | `INSTALL_BRAVE` | `0` = lewati install `brave-browser` (default `1`; wrapper `brave` dengan `--no-sandbox` tetap dibuat kalau binary sudah ada) |
 | `SITE_REPO` | Repo tujuan clone/push web toko roti (default `AgungAG/toko-roti`) |
+| `TG_BOT_TOKEN` | **Rahasia** — token bot Telegram dari @BotFather (buat bot AI Telegram → model gratis OpenCode). Jangan taruh di GitHub |
+| `TG_CHAT_IDS` | Chat ID yang diizinkan pakai bot (pisah koma/spasi). Ambil ID: kirim `/start` ke bot |
 | `SITE_PORT` | Port web toko roti (default `8000`) |
 | `USE_CLOUDFLARED` | `0` = matikan tunnel publik (default `1`) |
 | `TAKE_TAILSCALE` | `0` = tunda ambil-alih tailscaled ke supervisor (buat hindari mutus sesi Tailscale SSH). Default `1` |
@@ -67,6 +69,40 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 6. Web toko roti: `python3 -m http.server` di `/root/toko-roti`
 7. Tunnel publik cloudflared (URL disimpan di `/root/cloudflared-url.txt`)
 8. GitHub: `gh login`, identitas git, auto-commit + push `toko-roti` dan script ini
+9. Bot Telegram: bot AI di `@<bot>_bot` → dijawab model **gratis** OpenCode
+   (MiMo/DeepSeek/GLM/dll), dijaga supervisor (`30-tgbot.conf`). Perintah:
+   `/new` `/models` `/model` `/id` `/help`
+
+## Bot Telegram — kode bersih, rahasia lokal
+
+Repo ini publik, jadi **token bot TIDAK boleh masuk git**. Pemisahannya:
+
+| Bagian | Disimpan di | Isi |
+|---|---|---|
+| Kode bot | `bot-telegram/bot.py` di repo ini | tanpa rahasia — aman di-commit & push |
+| Rahasia | `/root/.machine-secrets` (`chmod 600`) | `TG_BOT_TOKEN`, `TG_CHAT_IDS` |
+
+Tiap `bash setup.sh` jalan, `config.json` bot **ditulis ulang** dari
+`.machine-secrets` (chmod 600) — jadi rahasia selalu ikut pulih tiap reset
+tanpa pernah tersentuh GitHub. Langkah ini otomatis dilewati (dengan peringatan)
+kalau `TG_BOT_TOKEN` belum diisi.
+
+Restore bot setelah reset:
+
+```bash
+# sekali saja — titipkan rahasia biar tidak diketik lagi
+cat >> /root/.machine-secrets <<'EOF'
+TG_BOT_TOKEN=12345:AA...
+TG_CHAT_IDS=463744175
+EOF
+chmod 600 /root/.machine-secrets
+
+bash setup.sh        # bot.py disalin dari repo + config dibuat + supervisor jalan
+```
+
+Catatan: `config.json` dibuat ulang tiap run → kalau mau ganti model default /
+chat id, ubah lewat `.machine-secrets` (bukan edit `config.json` manual).
+Log bot: `/var/log/tg-opencode-bot.log`. Cek: `supervisorctl status tg-opencode-bot`.
 
 ## Menu interaktif
 
