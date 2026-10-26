@@ -6,7 +6,10 @@
 #   1) Install keseluruhan  → jalankan setup.sh (pulihkan mesin dari nol:
 #                              paket dasar, Google Chrome, Brave wrapper
 #                              --no-sandbox, Tailscale, OpenCode, upterm,
-#                              web toko roti, tunnel, GitHub)
+#                              web toko roti, tunnel, GitHub). Kalau setup.sh
+#                              belum ada — misal habis reset, yang di-download
+#                              cuma menu.sh — filenya diambil otomatis dari
+#                              GitHub dulu.
 #   2) Generate SSH         → upterm host --accept -- bash
 #                              (cetak command SSH temporer — siapa pun yang
 #                              command-nya dipegang bisa ikut shell yang sama.
@@ -19,25 +22,51 @@
 #
 # Restore dari nol (repo ini PUBLIK — tanpa token sama sekali):
 #   curl -fsSL -o menu.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/main/menu.sh
-#   bash menu.sh
+#   bash menu.sh              → pilih 1 (setup.sh ikut diunduh otomatis)
+#
+# Atau langsung setup.sh saja:
+#   curl -fsSL -o setup.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/main/setup.sh
+#   bash setup.sh
 #
 set -uo pipefail   # tanpa -e: menu tidak boleh mati cuma karena satu opsi gagal
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 SETUP_SH="${SCRIPT_DIR}/setup.sh"
 [ -f "$SETUP_SH" ] || SETUP_SH="/root/setup.sh"
+SETUP_URL="https://raw.githubusercontent.com/AgungAG/mesin-setup/main/setup.sh"
 
 log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 
+# Unduh URL ke file — curl dulu, wget sebagai cadangan (sama seperti setup.sh).
+fetch_to() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL -o "$2" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$2" "$1"
+    else
+        return 1
+    fi
+}
+
 # --- Opsi 1 ------------------------------------------------------------
-# Satu pintu ke setup.sh — termasuk install Brave (--no-sandbox) + upterm.
-install_all() {
-    if [ ! -f "$SETUP_SH" ]; then
-        warn "setup.sh tidak ditemukan → ambil dulu:"
-        warn "  curl -fsSL -o /root/setup.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/main/setup.sh"
+# Pastikan setup.sh ada sebelum dijalankan; kalau belum → ambil sendiri dari
+# GitHub. Tujuannya /root/setup.sh supaya langkah ensure_setup_repo di dalam
+# setup.sh mengenali file hasil unduhan ini (pindah ke repo + symlink).
+ensure_setup_sh() {
+    [ -f "$SETUP_SH" ] && return 0
+    warn "setup.sh tidak ditemukan → di-download otomatis dari GitHub..."
+    if fetch_to "$SETUP_URL" "$SETUP_SH"; then
+        log "setup.sh → $SETUP_SH"
         return 0
     fi
+    rm -f "$SETUP_SH"   # sisa file gagal (kosong/terpotong) jangan ditinggal
+    warn "download setup.sh gagal → cek koneksi ke raw.githubusercontent.com"
+    return 1
+}
+
+install_all() {
+    ensure_setup_sh || return 0
     log "Install keseluruhan: bash $SETUP_SH"
     bash "$SETUP_SH"
 }

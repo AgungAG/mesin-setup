@@ -81,7 +81,9 @@ bash /root/menu.sh
 | 2 | **Generate SSH** → `upterm host --accept -- bash` — cetak command SSH temporer, bagikan command-nya ke siapa pun yang mau ikut shell yang sama (sesi mati sendiri kalau host-nya keluar) |
 | 3 | **Keluar** |
 
-Ambil `menu.sh` saja tanpa ikut `setup.sh`:
+Ambil `menu.sh` saja tanpa ikut `setup.sh` — kalau nanti dipilih opsi 1 tapi
+`setup.sh` belum ada (misal habis reset), filenya di-download otomatis dari
+GitHub ini:
 
 ```bash
 curl -fsSL -o menu.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/main/menu.sh
