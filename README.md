@@ -51,13 +51,15 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 0. Repo Google Chrome: keyring + `/etc/apt/sources.list.d/google-chrome.list`
    — jalan **paling awal**, sebelum `apt update` pertama, biar reset pertama
    tidak berhenti dengan error `NO_PUBKEY`
-1. Paket dasar: `git tmux gh jq curl ca-certificates`
+1. Paket dasar: `git tmux gh jq curl ca-certificates xclip`
+   (`xclip` buat fitur copy-ke-clipboard `menu.sh` opsi 3 di desktop VNC)
 2. Google Chrome: `google-chrome-stable` dari repo resmi Google (`INSTALL_CHROME=0` untuk lewati)
 2b. Brave: `brave-browser` dari repo resmi Brave + wrapper `brave` yang selalu
     menambah `--no-sandbox` (container jalan sebagai root → sandbox Chromium
     menolak start). Buka Brave dengan perintah `brave` (`INSTALL_BRAVE=0` untuk lewati)
 2c. Upterm: `upterm` dari rilis resmi GitHub → `upterm host --accept -- bash`
-    bikin sesi SSH temporer tanpa perlu sshd/key sama sekali (dipakai `menu.sh` opsi 2)
+    bikin sesi SSH temporer tanpa perlu sshd/key sama sekali (dipakai `menu.sh`
+    opsi 3, lengkap dengan auto-copy command SSH ke clipboard)
 3. Tailscale (install + login `--ssh`) + `tailscale serve` → `https://<mesin>.ts.net`
 4. OpenCode (install + PATH)
 5. SSH: **tidak dipasang** — akses lewat Tailscale SSH (ditangani tailscaled);
@@ -77,9 +79,16 @@ bash /root/menu.sh
 
 | Opsi | Isi |
 |---|---|
-| 1 | **Install keseluruhan** → jalankan `setup.sh` (pulihkan mesin dari nol) |
-| 2 | **Generate SSH** → `upterm host --accept -- bash` — cetak command SSH temporer, bagikan command-nya ke siapa pun yang mau ikut shell yang sama (sesi mati sendiri kalau host-nya keluar) |
-| 3 | **Keluar** |
+| 1 | **Install keseluruhan** → jalankan `setup.sh` penuh (pulihkan mesin dari nol) |
+| 2 | **apt update + Brave + upterm saja** → `bash setup.sh tools` (mode ringan, tanpa menyentuh service/supervisor) |
+| 3 | **Generate SSH** → `upterm host --accept -- bash` — begitu command SSH tercetak, **otomatis disalin ke clipboard** (OSC 52 + `xclip`) dan disimpan di `/root/upterm-ssh.txt`, jadi tinggal paste di mesin lain (sesi mati sendiri kalau host-nya keluar) |
+| 4 | **Keluar** |
+
+Mode tools juga bisa dipanggil langsung tanpa menu:
+
+```bash
+bash setup.sh tools
+```
 
 Ambil `menu.sh` saja tanpa ikut `setup.sh` — kalau nanti dipilih opsi 1 tapi
 `setup.sh` belum ada (misal habis reset), filenya di-download otomatis dari

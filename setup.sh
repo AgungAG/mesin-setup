@@ -17,7 +17,7 @@
 #                       INSTALL_BRAVE=0
 #   2c. Upterm        : upterm — bikin sesi SSH temporer (`upterm host --accept
 #                       -- bash`) biar orang lain bisa ikut di shell yang sama.
-#                       Dipakai oleh menu interaktif menu.sh (opsi 2).
+#                       Dipakai oleh menu interaktif menu.sh (opsi 3).
 #   3. Tailscale      : install + tailscaled jalan + login (--ssh)
 #   4. OpenCode       : install + PATH di .bashrc
 #   5. SSH            : TIDAK dipasang — akses masuk lewat Tailscale SSH
@@ -37,8 +37,11 @@
 #   tetap ada (buat git ssh dan `tailscale ssh`). Alasan lengkap: remove_sshd.
 #
 # Pemakaian:
-#   bash setup.sh
-#   Menu interaktif (install keseluruhan / generate SSH upterm / keluar):
+#   bash setup.sh               Setup penuh dari nol.
+#   bash setup.sh tools         Mode ringan: apt update + install Brave +
+#                               upterm saja — tanpa menyentuh service/supervisor
+#                               (dipakai menu.sh opsi 2).
+#   Menu interaktif (install / mode tools / generate SSH / keluar):
 #     bash /root/menu.sh
 #
 # RESTORE DARI NOL (mesin baru / habis reset, /root sudah bersih):
@@ -263,11 +266,13 @@ ensure_google_chrome_repo() {
 # =========================================================
 install_packages() {
     local need=() p
-    for p in git tmux jq curl ca-certificates; do
+    # xclip: buat fitur copy-ke-clipboard di menu.sh opsi 3 (aktif kalau ada
+    # DISPLAY — desktop VNC bawaan image; tanpa X tetap terpasang tapi diam).
+    for p in git tmux jq curl ca-certificates xclip; do
         dpkg -s "$p" >/dev/null 2>&1 || need+=("$p")
     done
     if [ "${#need[@]}" -eq 0 ]; then
-        log "Paket dasar sudah lengkap (git tmux jq curl ca-certificates)"
+        log "Paket dasar sudah lengkap (git tmux jq curl ca-certificates xclip)"
         return
     fi
     log "Install paket: ${need[*]}"
@@ -1157,6 +1162,20 @@ start_dev_session() {
 main() {
     load_secrets
 
+    # Mode ringan `tools` (menu.sh opsi 2): cukup apt update + Brave + upterm.
+    # Sengaja berhenti DI SINI — tidak menyentuh supervisor/service/login,
+    # jadi aman dijalankan kapan saja tanpa memutus sesi yang sedang jalan.
+    if [ "${1:-}" = "tools" ]; then
+        log "Mode tools: apt update + Brave + upterm saja (tanpa setup penuh)"
+        reset_google_chrome_repo
+        ensure_google_chrome_repo
+        apt_update
+        install_brave
+        install_upterm
+        log "Mode tools selesai"
+        return 0
+    fi
+
     # PALING AWAL — buang sisa Chrome lama dulu, baru dipasang ulang.
     # Kalau dilewat, apt update pertama bisa gagal NO_PUBKEY.
     reset_google_chrome_repo
@@ -1275,7 +1294,7 @@ summary() {
     echo "  • tailscaled/web/tunnel dijaga supervisord → ikut bangun sendiri"
     echo "    tiap container hidup. Cek: supervisorctl status"
     echo "  • Menu interaktif: bash /root/menu.sh → 1) install keseluruhan"
-    echo "    2) share terminal via upterm (SSH temporer) 3) keluar."
+    echo "    2) apt update + Brave + upterm 3) generate SSH (auto-copy) 4) keluar."
     echo "  • URL https://...ts.net hanya bisa dibuka dari device yang sudah masuk"
     echo "    tailnet (HP/laptop yang login Tailscale). Luar tailnet → pakai tunnel"
     echo "    cloudflared di atas."

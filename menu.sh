@@ -3,18 +3,24 @@
 # menu.sh — menu interaktif mesin-setup
 #
 # Opsi:
-#   1) Install keseluruhan  → jalankan setup.sh (pulihkan mesin dari nol:
+#   1) Install keseluruhan  → jalankan setup.sh penuh (restore mesin dari nol:
 #                              paket dasar, Google Chrome, Brave wrapper
 #                              --no-sandbox, Tailscale, OpenCode, upterm,
 #                              web toko roti, tunnel, GitHub). Kalau setup.sh
 #                              belum ada — misal habis reset, yang di-download
 #                              cuma menu.sh — filenya diambil otomatis dari
 #                              GitHub dulu.
-#   2) Generate SSH         → upterm host --accept -- bash
-#                              (cetak command SSH temporer — siapa pun yang
-#                              command-nya dipegang bisa ikut shell yang sama.
-#                              Sesi mati sendiri kalau host-nya keluar.)
-#   3) Keluar
+#   2) apt update + Brave + upterm saja
+#                           → `bash setup.sh tools` (mode ringan): refresh
+#                              repo lalu pasang Brave + upterm. Tidak menyentuh
+#                              service/supervisor → aman kapan saja.
+#   3) Generate SSH         → upterm host --accept -- bash. Begitu command
+#                              SSH tercetak, OTOMATIS disalin ke clipboard
+#                              (OSC 52 ke terminal + xclip di desktop VNC)
+#                              dan disimpan ke /root/upterm-ssh.txt → tinggal
+#                              paste di mesin lain. Sesi mati kalau host-nya
+#                              keluar.
+#   4) Keluar
 #
 # Pemakaian:
 #   bash /root/menu.sh        (jalur pendek; symlink ke mesin-setup/menu.sh)
@@ -34,6 +40,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 SETUP_SH="${SCRIPT_DIR}/setup.sh"
 [ -f "$SETUP_SH" ] || SETUP_SH="/root/setup.sh"
 SETUP_URL="https://raw.githubusercontent.com/AgungAG/mesin-setup/main/setup.sh"
+SSH_FILE="/root/upterm-ssh.txt"
 
 log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
@@ -49,10 +56,7 @@ fetch_to() {
     fi
 }
 
-# --- Opsi 1 ------------------------------------------------------------
-# Pastikan setup.sh ada sebelum dijalankan; kalau belum → ambil sendiri dari
-# GitHub. Tujuannya /root/setup.sh supaya langkah ensure_setup_repo di dalam
-# setup.sh mengenali file hasil unduhan ini (pindah ke repo + symlink).
+# Pastikan setup.sh ada; kalau tidak → ambil sendiri dari GitHub (repo publik).
 ensure_setup_sh() {
     [ -f "$SETUP_SH" ] && return 0
     warn "setup.sh tidak ditemukan → di-download otomatis dari GitHub..."
@@ -65,6 +69,7 @@ ensure_setup_sh() {
     return 1
 }
 
+# --- Opsi 1 ------------------------------------------------------------
 install_all() {
     ensure_setup_sh || return 0
     log "Install keseluruhan: bash $SETUP_SH"
@@ -72,18 +77,80 @@ install_all() {
 }
 
 # --- Opsi 2 ------------------------------------------------------------
-# `--accept` = tanpa otorisasi: siapa pun yang pegang command SSH-nya bisa
-# masuk. Berjalan di foreground — sesi hidup selama bash-nya hidup.
+# Mode ringan setup.sh: apt update + Brave + upterm. Tanpa setup penuh.
+install_tools() {
+    ensure_setup_sh || return 0
+    bash "$SETUP_SH" tools
+}
+
+# --- Opsi 3 ------------------------------------------------------------
+# Sesi upterm dibungkus `script` (pty) supaya keluarannya bisa DIBACA sambil
+# tetap interaktif. Begitu baris command SSH muncul di log, watcher menyalinnya:
+#   1. OSC 52  → clipboard TERMINAL yang memutar sesi ini (ikut lewat SSH,
+#                 asal klien terminalnya mendukung OSC 52)
+#   2. xclip   → clipboard desktop VNC (kalau DISPLAY ada & xclip terpasang)
+#   3. file    → /root/upterm-ssh.txt sebagai cadangan tempel manual
 host_session() {
     if ! command -v upterm >/dev/null 2>&1; then
-        warn "upterm belum terinstall → jalankan opsi 1 dulu"
+        warn "upterm belum terinstall → jalankan opsi 1 atau 2 dulu"
         return 0
     fi
+    if ! command -v script >/dev/null 2>&1; then
+        warn "perintah 'script' tidak ada → command SSH harus disalin manual"
+        upterm host --accept -- bash
+        return 0
+    fi
+
+    local sess_log watcher cmd b64 i
+    sess_log=$(mktemp)
     log "Mulai sesi: upterm host --accept -- bash"
-    echo "Salin command SSH yang dicetak (contoh: ssh xxxx@uptermd.upterm.dev:2222)"
-    echo "→ bagikan ke yang mau ikut sesi ini. Akhiri dengan 'exit' / Ctrl-D."
+    echo "Begitu command SSH tercetak, otomatis:"
+    echo "  • disalin ke clipboard — tinggal paste di mesin lain"
+    echo "  • disimpan di $SSH_FILE"
     echo
-    upterm host --accept -- bash
+
+    # watcher: polling cepat (0,5 detik) supaya command tertangkap walau
+    # sesinya sangat singkat; berhenti sendiri setelah ketemu atau 30 detik
+    (
+        cmd=""
+        for i in $(seq 60); do
+            cmd=$(grep -ohE 'ssh [A-Za-z0-9]+@uptermd\.upterm\.dev' "$sess_log" 2>/dev/null | head -1 || true)
+            [ -n "$cmd" ] && break
+            sleep 0.5
+        done
+        [ -n "$cmd" ] || exit 0
+
+        printf '%s\n' "$cmd" > "$SSH_FILE"
+
+        # OSC 52: base64 tanpa wrap; tulis ke /dev/tty bila ada, kalau tidak
+        # (misal dijalankan tanpa terminal) jatuh ke stdout biasa
+        b64=$(printf '%s' "$cmd" | base64 -w0 2>/dev/null || printf '%s' "$cmd" | base64)
+        { printf '\033]52;c;%s\007' "$b64" > /dev/tty; } 2>/dev/null \
+            || printf '\033]52;c;%s\007' "$b64" 2>/dev/null \
+            || true
+
+        # cadangan lokal: clipboard X11 (desktop VNC bawaan image)
+        if command -v xclip >/dev/null 2>&1; then
+            printf '%s' "$cmd" | xclip -selection clipboard 2>/dev/null || true
+        fi
+
+        printf '\n\033[1;32m==>\033[0m Command SSH disalin ke clipboard (juga: %s)\n\033[1;92m    %s\033[0m\n' \
+            "$SSH_FILE" "$cmd"
+    ) &
+    watcher=$!
+
+    script -qefc "upterm host --accept -- bash" "$sess_log" || true
+
+    # sesi sudah selesai → beri watcher waktu 3 detik buat menangkap sisa
+    # log, lalu hentikan; dia juga berhenti sendiri setelah 30 detik
+    for i in 1 2 3 4 5 6; do
+        kill -0 "$watcher" 2>/dev/null || break
+        sleep 0.5
+    done
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    rm -f "$sess_log"
+    return 0
 }
 
 # --- Menu --------------------------------------------------------------
@@ -91,16 +158,18 @@ while true; do
     cat <<'EOF'
 
   +-- mesin-setup ----------------------------------+
-  |  1) Install keseluruhan (setup.sh)             |
-  |  2) Generate SSH  (upterm host --accept -- bash)|
-  |  3) Keluar                                     |
-  +------------------------------------------------+
+  |  1) Install keseluruhan (setup.sh)              |
+  |  2) apt update + Brave + upterm saja            |
+  |  3) Generate SSH (upterm) + copy clipboard      |
+  |  4) Keluar                                      |
+  +-------------------------------------------------+
 EOF
-    read -r -p "  Pilih [1-3]: " pilih || { echo; pilih=3; }
+    read -r -p "  Pilih [1-4]: " pilih || { echo; pilih=4; }
     case "$pilih" in
         1)      install_all ;;
-        2)      host_session ;;
-        3|q|Q)  log "Keluar."; exit 0 ;;
-        *)      warn "Pilihan tidak dikenal: '$pilih' (pakai 1/2/3)" ;;
+        2)      install_tools ;;
+        3)      host_session ;;
+        4|q|Q)  log "Keluar."; exit 0 ;;
+        *)      warn "Pilihan tidak dikenal: '$pilih' (pakai 1/2/3/4)" ;;
     esac
 done
