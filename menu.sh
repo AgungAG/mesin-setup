@@ -57,15 +57,38 @@ fetch_to() {
     fi
 }
 
-# Pastikan setup.sh ada; kalau tidak → ambil sendiri dari GitHub (repo publik).
+# Penanda bahwa file itu benar-benar setup.sh (bukan file yang tertukar).
+SETUP_MARKER='setup.sh — Restore mesin ini dari nol'
+SETUP_MIN_BYTES=10000   # setup.sh utuh ±54 KB; di bawah itu pasti terpotong
+
+# Cek isi file, bukan cuma keberadaannya. Cek `[ -f ]` saja ternyata tidak
+# cukup: kalau setup.sh pernah ketimpa salinan menu.sh (ukurannya sama persis
+# dengan menu.sh), opsi 1/2 akan "jalan" tapi tidak melakukan apa-apa karena
+# yang dipanggil justru menu lagi.
+setup_sh_valid() {
+    [ -f "$SETUP_SH" ] || return 1
+    grep -qF "$SETUP_MARKER" "$SETUP_SH" 2>/dev/null || return 1
+    [ "$(wc -c < "$SETUP_SH")" -ge "$SETUP_MIN_BYTES" ] || return 1
+    return 0
+}
+
+# Pastikan setup.sh ada DAN isinya benar; kalau tidak → ambil sendiri dari
+# GitHub (repo publik).
 ensure_setup_sh() {
-    [ -f "$SETUP_SH" ] && return 0
-    warn "setup.sh tidak ditemukan → di-download otomatis dari GitHub..."
-    if fetch_to "$SETUP_URL" "$SETUP_SH"; then
+    if setup_sh_valid; then
+        return 0
+    fi
+    if [ -f "$SETUP_SH" ]; then
+        warn "setup.sh ada tapi isinya salah (tertukar/rusak/terpotong) → di-download ulang..."
+        rm -f "$SETUP_SH"
+    else
+        warn "setup.sh tidak ditemukan → di-download otomatis dari GitHub..."
+    fi
+    if fetch_to "$SETUP_URL" "$SETUP_SH" && setup_sh_valid; then
         log "setup.sh → $SETUP_SH"
         return 0
     fi
-    rm -f "$SETUP_SH"   # sisa file gagal (kosong/terpotong) jangan ditinggal
+    rm -f "$SETUP_SH"   # sisa file gagal (kosong/terpotong/salah isi) jangan ditinggal
     warn "download setup.sh gagal → cek koneksi ke raw.githubusercontent.com"
     return 1
 }
