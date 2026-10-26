@@ -80,7 +80,7 @@ bash /root/menu.sh
 | Opsi | Isi |
 |---|---|
 | 1 | **Install keseluruhan** → jalankan `setup.sh` penuh (pulihkan mesin dari nol) |
-| 2 | **apt update + Brave + upterm saja** → `bash setup.sh tools` (mode ringan, tanpa menyentuh service/supervisor) |
+| 2 | **apt update + gh + opencode + Brave + upterm** → `bash setup.sh tools` (mode ringan, tanpa menyentuh service/supervisor) |
 | 3 | **Generate SSH** → `upterm host --accept -- bash` — begitu command SSH tercetak, **otomatis disalin ke clipboard** (OSC 52 + `xclip`) dan disimpan di `/root/upterm-ssh.txt`, jadi tinggal paste di mesin lain (sesi mati sendiri kalau host-nya keluar) |
 | 4 | **Keluar** |
 

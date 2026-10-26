@@ -38,9 +38,9 @@
 #
 # Pemakaian:
 #   bash setup.sh               Setup penuh dari nol.
-#   bash setup.sh tools         Mode ringan: apt update + install Brave +
-#                               upterm saja — tanpa menyentuh service/supervisor
-#                               (dipakai menu.sh opsi 2).
+#   bash setup.sh tools         Mode ringan: apt update + install gh, opencode,
+#                               Brave, upterm — tanpa menyentuh
+#                               service/supervisor (dipakai menu.sh opsi 2).
 #   Menu interaktif (install / mode tools / generate SSH / keluar):
 #     bash /root/menu.sh
 #
@@ -1162,16 +1162,19 @@ start_dev_session() {
 main() {
     load_secrets
 
-    # Mode ringan `tools` (menu.sh opsi 2): cukup apt update + Brave + upterm.
-    # Sengaja berhenti DI SINI — tidak menyentuh supervisor/service/login,
-    # jadi aman dijalankan kapan saja tanpa memutus sesi yang sedang jalan.
+    # Mode ringan `tools` (menu.sh opsi 2): cukup apt update + gh + opencode
+    # + Brave + upterm. Sengaja berhenti DI SINI — tidak menyentuh
+    # supervisor/service/login, jadi aman dijalankan kapan saja tanpa memutus
+    # sesi yang sedang jalan.
     if [ "${1:-}" = "tools" ]; then
-        log "Mode tools: apt update + Brave + upterm saja (tanpa setup penuh)"
+        log "Mode tools: apt update + gh + opencode + Brave + upterm (tanpa setup penuh)"
         reset_google_chrome_repo
         ensure_google_chrome_repo
         apt_update
+        install_gh
         install_brave
         install_upterm
+        install_opencode
         log "Mode tools selesai"
         return 0
     fi
@@ -1294,7 +1297,7 @@ summary() {
     echo "  • tailscaled/web/tunnel dijaga supervisord → ikut bangun sendiri"
     echo "    tiap container hidup. Cek: supervisorctl status"
     echo "  • Menu interaktif: bash /root/menu.sh → 1) install keseluruhan"
-    echo "    2) apt update + Brave + upterm 3) generate SSH (auto-copy) 4) keluar."
+    echo "    2) tools: gh+opencode+Brave+upterm  3) generate SSH (auto-copy)  4) keluar."
     echo "  • URL https://...ts.net hanya bisa dibuka dari device yang sudah masuk"
     echo "    tailnet (HP/laptop yang login Tailscale). Luar tailnet → pakai tunnel"
     echo "    cloudflared di atas."

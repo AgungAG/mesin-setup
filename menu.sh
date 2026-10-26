@@ -10,10 +10,11 @@
 #                              belum ada — misal habis reset, yang di-download
 #                              cuma menu.sh — filenya diambil otomatis dari
 #                              GitHub dulu.
-#   2) apt update + Brave + upterm saja
+#   2) apt update + gh + opencode + Brave + upterm
 #                           → `bash setup.sh tools` (mode ringan): refresh
-#                              repo lalu pasang Brave + upterm. Tidak menyentuh
-#                              service/supervisor → aman kapan saja.
+#                              repo lalu pasang gh, opencode, Brave, upterm.
+#                              Tidak menyentuh service/supervisor → aman
+#                              kapan saja.
 #   3) Generate SSH         → upterm host --accept -- bash. Begitu command
 #                              SSH tercetak, OTOMATIS disalin ke clipboard
 #                              (OSC 52 ke terminal + xclip di desktop VNC)
@@ -159,7 +160,7 @@ while true; do
 
   +-- mesin-setup ----------------------------------+
   |  1) Install keseluruhan (setup.sh)              |
-  |  2) apt update + Brave + upterm saja            |
+  |  2) apt update + gh + opencode + Brave + upterm |
   |  3) Generate SSH (upterm) + copy clipboard      |
   |  4) Keluar                                      |
   +-------------------------------------------------+
