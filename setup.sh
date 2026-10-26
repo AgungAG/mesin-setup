@@ -11,6 +11,13 @@
 #   1. Paket dasar    : git, tmux, jq, curl, ca-certificates
 #                       + gh dari repo resmi GitHub CLI (cli.github.com)
 #   2. Google Chrome  : google-chrome-stable (bisa dimatikan: INSTALL_CHROME=0)
+#   2b. Brave         : brave-browser dari repo resmi Brave + wrapper `brave`
+#                       yang selalu menambah --no-sandbox (container jalan sebagai
+#                       root → sandbox Chromium menolak start). Bisa dimatikan:
+#                       INSTALL_BRAVE=0
+#   2c. Upterm        : upterm — bikin sesi SSH temporer (`upterm host --accept
+#                       -- bash`) biar orang lain bisa ikut di shell yang sama.
+#                       Dipakai oleh menu interaktif menu.sh (opsi 2).
 #   3. Tailscale      : install + tailscaled jalan + login (--ssh)
 #   4. OpenCode       : install + PATH di .bashrc
 #   5. SSH            : TIDAK dipasang — akses masuk lewat Tailscale SSH
@@ -31,6 +38,8 @@
 #
 # Pemakaian:
 #   bash setup.sh
+#   Menu interaktif (install keseluruhan / generate SSH upterm / keluar):
+#     bash /root/menu.sh
 #
 # RESTORE DARI NOL (mesin baru / habis reset, /root sudah bersih):
 #   curl -fsSL -o setup.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/main/setup.sh
@@ -48,6 +57,10 @@
 #   GH_TOKEN=ghp_xxxx           Token GitHub supaya gh login otomatis.
 #   INSTALL_CHROME=0           Lewati install google-chrome-stable (default 1).
 #                               Repo Chrome-nya tetap dipasang di langkah 0.
+#   INSTALL_BRAVE=0            Lewati install brave-browser (default 1).
+#                               Repo Brave-nya tetap dipasang, dan wrapper
+#                               `brave` (--no-sandbox) tetap dibuat kalau binary
+#                               sudah ada dari install sebelumnya.
 #   SITE_REPO=AgungAG/toko-roti Repo tujuan push backup toko-roti.
 #   SITE_PORT=8000              Port web toko roti (default 8000).
 #   USE_CLOUDFLARED=0           Matikan tunnel publik (default: 1 = aktif).
@@ -82,6 +95,8 @@ TS_AUTHKEY="${TS_AUTHKEY:-}"
 GH_TOKEN="${GH_TOKEN:-}"
 SITE_REPO="${SITE_REPO:-AgungAG/toko-roti}"
 INSTALL_CHROME="${INSTALL_CHROME:-1}"
+INSTALL_BRAVE="${INSTALL_BRAVE:-1}"
+UPTERM_BIN="/usr/local/bin/upterm"
 
 # Hasil yang dicetak di ringkasan akhir
 SERVE_URL=""
@@ -313,6 +328,159 @@ install_chrome() {
         warn "Install Chrome gagal → cek koneksi ke dl.google.com, lalu jalankan ulang:"
         warn "    INSTALL_CHROME=1 bash $0"
     fi
+}
+
+# =========================================================
+# 2b. BRAVE — repo resmi Brave + wrapper --no-sandbox
+# =========================================================
+# Container ini jalan sebagai root, dan sandbox Chromium (juga dipakai Brave)
+# MENOLAK start sebagai root tanpa --no-sandbox. Jadi dua bagian di sini:
+#   1. Repo resmi Brave (keyring + deb822 .sources) → `apt install brave-browser`
+#      — sama polanya dengan repo Google Chrome di atas.
+#   2. Wrapper /usr/local/bin/brave yang selalu menambah --no-sandbox, plus
+#      patch baris Exec di .desktop-nya biar ikut jalan dari ikon desktop.
+#      Alasan dipisah: flag-nya nempel di wrapper, bukan di binary — jadi
+#      upgrade paket tidak menghapusnya.
+#
+# Idempoten: repo dilewati kalau sudah ada; wrapper ditulis ulang tiap run.
+# ($SUDO sengaja tidak di-quote: nilainya "" atau "sudo")
+# shellcheck disable=SC2086
+ensure_brave_repo() {
+    local keyring="/usr/share/keyrings/brave-browser-archive-keyring.gpg"
+    local sources="/etc/apt/sources.list.d/brave-browser-release.sources"
+    local key_url="https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg"
+    local src_url="https://brave-browser-apt-release.s3.brave.com/brave-browser.sources"
+    local tmp
+
+    if [ -s "$keyring" ] && [ -f "$sources" ]; then
+        log "Repo Brave sudah siap ($sources)"
+        return 0
+    fi
+
+    log "Siapkan repo Brave..."
+    $SUDO mkdir -p /usr/share/keyrings /etc/apt/sources.list.d
+
+    if [ ! -s "$keyring" ]; then
+        tmp=$(mktemp)
+        if fetch_url "$key_url" > "$tmp" && [ -s "$tmp" ]; then
+            $SUDO install -m 644 "$tmp" "$keyring"
+            log "Keyring Brave → $keyring"
+        else
+            warn "Ambil key Brave gagal → install brave-browser akan dilewati"
+            warn "  manual: curl -fsSLo $keyring $key_url"
+            rm -f "$tmp"
+            return 1
+        fi
+        rm -f "$tmp"
+    fi
+
+    # Format deb822 (.sources), bukan baris `deb` lama — mengikuti petunjuk
+    # resmi https://brave.com/linux/ sekarang.
+    if [ ! -f "$sources" ]; then
+        if fetch_url "$src_url" > "$tmp" && [ -s "$tmp" ]; then
+            $SUDO install -m 644 "$tmp" "$sources"
+            log "Source Brave → $sources"
+        else
+            warn "Ambil source Brave gagal → install brave-browser akan dilewati"
+            rm -f "$tmp"
+            return 1
+        fi
+        rm -f "$tmp"
+    fi
+}
+
+# Wrapper `brave`: titik masuk yang AMAN dijalankan sebagai root.
+# (Kalau dipanggil langsung /usr/bin/brave-browser sebagai root, Brave
+# langsung exit — lihat pesannya: "Running as root without --no-sandbox ...")
+brave_no_sandbox_wrapper() {
+    [ -x /usr/bin/brave-browser ] || return 0
+    local tmp
+    tmp=$(mktemp)
+    cat > "$tmp" <<'EOF'
+#!/usr/bin/env bash
+# Dibuat otomatis oleh setup.sh — jangan diedit manual (ditimpa ulang tiap run).
+# Container ini root → sandbox Chromium menolak start tanpa flag ini.
+exec /usr/bin/brave-browser --no-sandbox "$@"
+EOF
+    $SUDO install -m 755 "$tmp" /usr/local/bin/brave
+    rm -f "$tmp"
+
+    # Ikon desktop juga perlu diarahkan ke wrapper — jalur peluncurnya bisa
+    # bermacam2 (/usr/bin/brave-browser, /usr/local/bin/brave-stable yang
+    # kadang tidak ada, dst), jadi semua baris Exec yang menunjuk binary
+    # ber-"brave" diganti ke wrapper. Idempoten: hasilnya (/usr/local/bin/brave)
+    # tetap sama walau dijalankan berulang.
+    local desk="/usr/share/applications/brave-browser.desktop"
+    if [ -f "$desk" ] && grep -qE '^Exec=/[^ ]*brave' "$desk" 2>/dev/null; then
+        if grep -qE '^Exec=/usr/local/bin/brave( |$)' "$desk"; then
+            log "Ikon desktop Brave sudah menunjuk wrapper"
+        elif $SUDO sed -i -E 's|^Exec=/[^ ]*brave[^ ]*|Exec=/usr/local/bin/brave|' "$desk"; then
+            log "Ikon desktop Brave diarahkan ke wrapper → $desk"
+        else
+            warn "patch $desk gagal → buka Brave lewat: brave"
+        fi
+    fi
+    log "Wrapper Brave (--no-sandbox) → /usr/local/bin/brave"
+}
+
+install_brave() {
+    if [ "$INSTALL_BRAVE" = "1" ]; then
+        if dpkg -s brave-browser >/dev/null 2>&1; then
+            log "Brave sudah terinstall ($(dpkg-query -W -f='${Version}' brave-browser 2>/dev/null))"
+        elif ensure_brave_repo; then
+            log "Install brave-browser..."
+            apt_update
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y brave-browser; then
+                log "Brave terpasang ($(command -v brave-browser || echo '/usr/bin/brave-browser'))"
+            else
+                warn "Install Brave gagal → cek koneksi ke brave-browser-apt-release.s3.brave.com"
+            fi
+        fi
+    else
+        log "Install Brave dimatikan (INSTALL_BRAVE=0)"
+    fi
+    # wrapper tetap dipastikan ada selama binary-nya ada — walau install dimatikan
+    brave_no_sandbox_wrapper
+}
+
+# =========================================================
+# 2c. UPTERM — SSH temporer ke shell yang sedang berjalan
+# =========================================================
+# `upterm host --accept -- bash` mencetak command SSH sementara (mis.
+# ssh xxx@uptermd.upterm.dev:2222) — siapa pun yang command-nya dipegang bisa
+# ikut di shell yang sama, tanpa perlu setup sshd/key sama sekali. Sesi mati
+# sendiri kalau host-nya keluar. Dipakai dari menu.sh (opsi 2).
+#
+# Dipasang sebagai paket .deb resmi dari rilis GitHub → `apt` ikut mengatur
+# upgrade/hapusnya. Idempoten: kalau sudah terinstall, dilewati.
+install_upterm() {
+    if dpkg -s upterm >/dev/null 2>&1 || command -v upterm >/dev/null 2>&1; then
+        log "upterm sudah terinstall ($(upterm version 2>/dev/null | head -1))"
+        return
+    fi
+    local arch
+    case "$(dpkg --print-architecture)" in
+        amd64)  arch="amd64" ;;
+        arm64)  arch="arm64" ;;
+        armhf)  arch="armv6" ;;
+        i386)   arch="386" ;;
+        *)      warn "arsitektur $(dpkg --print-architecture) tidak dirilis upterm → dilewati"
+                return 0 ;;
+    esac
+    log "Install upterm ($arch) dari rilis GitHub..."
+    local url tmp
+    url="https://github.com/owenthereal/upterm/releases/latest/download/upterm_linux_${arch}.deb"
+    tmp=$(mktemp --suffix=.deb)
+    if curl -fsSL -o "$tmp" "$url"; then
+        if DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y "$tmp"; then
+            log "upterm terpasang ($("$UPTERM_BIN" version 2>/dev/null | head -1))"
+        else
+            warn "Install .deb upterm gagal → cek: apt-get install -f"
+        fi
+    else
+        warn "Download upterm gagal → cek koneksi ke github.com, lalu jalankan ulang: bash $0"
+    fi
+    rm -f "$tmp"
 }
 
 # =========================================================
@@ -912,19 +1080,32 @@ backup_kasir() {
 # =========================================================
 # 9. BACKUP SCRIPT INI SENDIRI
 # =========================================================
-# /root/setup.sh = symlink ke /root/mesin-setup/setup.sh (repo GitHub).
-# Repo-nya PUBLIK supaya bisa di-clone tanpa token — jadi restore-nya tetap
-# jalan walau GH_TOKEN belum ada sama sekali.
+# /root/setup.sh = symlink ke /root/mesin-setup/setup.sh (repo GitHub), dan
+# begitu juga /root/menu.sh. Repo-nya PUBLIK supaya bisa di-clone tanpa token
+# — jadi restore-nya tetap jalan walau GH_TOKEN belum ada sama sekali.
+#
+# Pindahkan script hasil curl ke dalam repo + pasang symlink /root/<nama>.
+# Dipakai untuk setup.sh dan menu.sh. Idempoten: tidak ada yang dipindah
+# kalau sudah rapi.
+adopt_script() {
+    local dir="/root/mesin-setup" name="$1"
+    # masih berupa file biasa (hasil curl) → pindahkan ke dalam repo
+    if [ -f "/root/$name" ] && [ ! -L "/root/$name" ]; then
+        mv -f "/root/$name" "$dir/$name"
+        log "$name dirapikan → $dir/$name (jalur /root/$name tetap jalan)"
+    fi
+    # belum ada di /root → pasang symlink biar jalurnya tetap pendek
+    if [ -f "$dir/$name" ] && [ ! -e "/root/$name" ]; then
+        ln -sfn "mesin-setup/$name" "/root/$name"
+    fi
+}
+
 ensure_setup_repo() {
     local dir="/root/mesin-setup" url="https://github.com/AgungAG/mesin-setup.git"
     command -v git >/dev/null 2>&1 || return 0
     if [ -e "$dir/.git" ]; then
-        # script masih berupa file biasa (hasil curl) → pindahkan ke dalam repo
-        if [ -f /root/setup.sh ] && [ ! -L /root/setup.sh ]; then
-            mv -f /root/setup.sh "$dir/setup.sh"
-            ln -sfn "mesin-setup/setup.sh" /root/setup.sh
-            log "setup.sh dirapikan → $dir/setup.sh (jalur /root/setup.sh tetap jalan)"
-        fi
+        adopt_script setup.sh
+        adopt_script menu.sh
         return 0
     fi
     [ -f /root/setup.sh ] || return 0
@@ -936,10 +1117,8 @@ ensure_setup_repo() {
         warn "Clone repo setup gagal (offline?) → script tetap jalan dari /root/setup.sh"
         return 0
     fi
-    if [ -f "$dir/setup.sh" ]; then
-        mv -f /root/setup.sh "$dir/setup.sh"
-    fi
-    ln -sfn "mesin-setup/setup.sh" /root/setup.sh
+    adopt_script setup.sh
+    adopt_script menu.sh
     log "setup.sh ada di $dir/setup.sh (jalur /root/setup.sh tetap jalan)"
 }
 
@@ -947,7 +1126,7 @@ backup_setup() {
     local dir="/root/mesin-setup"
     command -v git >/dev/null 2>&1 || return 0
     [ -e "$dir/.git" ] || return 0
-    git -C "$dir" add setup.sh
+    git -C "$dir" add setup.sh menu.sh
     if git -C "$dir" diff --cached --quiet 2>/dev/null; then
         log "Backup setup.sh: tidak ada perubahan"
     else
@@ -989,6 +1168,8 @@ main() {
     install_opencode
     install_cloudflared
     install_chrome
+    install_brave
+    install_upterm
     ensure_site
 
     # GitHub login di SINI (bukan di bawah): agar klone repo privat (kasir-roti)
@@ -1075,6 +1256,8 @@ summary() {
     fi
     echo "  Web lokal     : http://localhost:${SITE_PORT}   (dir: ${SITE_DIR})"
     echo "  OpenCode      : $(command -v opencode 2>/dev/null || echo "$OPENCODE_DIR/opencode")"
+    echo "  Brave         : brave  (wrapper otomatis --no-sandbox; asli: /usr/bin/brave-browser)"
+    echo "  Upterm        : $(command -v upterm 2>/dev/null || echo "$UPTERM_BIN")  → menu: bash /root/menu.sh (opsi 2)"
     echo "  SSH           : tailscale ssh root@${ts_ip}  (tanpa password; dari Termius/HP)"
     echo "  tmux          : tmux attach -t ${DEV_SESSION}"
     echo "  Secret        : $SECRET_FILE (chmod 600)"
@@ -1091,6 +1274,8 @@ summary() {
     echo "Catatan:"
     echo "  • tailscaled/web/tunnel dijaga supervisord → ikut bangun sendiri"
     echo "    tiap container hidup. Cek: supervisorctl status"
+    echo "  • Menu interaktif: bash /root/menu.sh → 1) install keseluruhan"
+    echo "    2) share terminal via upterm (SSH temporer) 3) keluar."
     echo "  • URL https://...ts.net hanya bisa dibuka dari device yang sudah masuk"
     echo "    tailnet (HP/laptop yang login Tailscale). Luar tailnet → pakai tunnel"
     echo "    cloudflared di atas."

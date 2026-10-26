@@ -14,7 +14,9 @@ curl -fsSL -o setup.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/mai
 bash setup.sh
 ```
 
-Selesai — sisanya jalan sendiri.
+Selesai — sisanya jalan sendiri. (Alternatif: `menu.sh` — menu opsi
+*install keseluruhan / generate SSH upterm / keluar*, lihat
+[Menu interaktif](#menu-iteraktif).)
 
 Dua command manual Google Chrome (keyring + `sources.list`) yang dulu harus
 dijalankan dulu biar `sudo apt update` jalan **sudah masuk di dalam script**
@@ -37,6 +39,7 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 | `TS_AUTHKEY` | Login Tailscale otomatis tanpa klik link. Ambil dari <https://login.tailscale.com/admin/settings/keys> |
 | `GH_TOKEN` | Token GitHub → `gh login` otomatis + push backup |
 | `INSTALL_CHROME` | `0` = lewati install `google-chrome-stable` (default `1`; repo Chrome tetap dipasang) |
+| `INSTALL_BRAVE` | `0` = lewati install `brave-browser` (default `1`; wrapper `brave` dengan `--no-sandbox` tetap dibuat kalau binary sudah ada) |
 | `SITE_REPO` | Repo tujuan clone/push web toko roti (default `AgungAG/toko-roti`) |
 | `SITE_PORT` | Port web toko roti (default `8000`) |
 | `USE_CLOUDFLARED` | `0` = matikan tunnel publik (default `1`) |
@@ -50,6 +53,11 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
    tidak berhenti dengan error `NO_PUBKEY`
 1. Paket dasar: `git tmux gh jq curl ca-certificates`
 2. Google Chrome: `google-chrome-stable` dari repo resmi Google (`INSTALL_CHROME=0` untuk lewati)
+2b. Brave: `brave-browser` dari repo resmi Brave + wrapper `brave` yang selalu
+    menambah `--no-sandbox` (container jalan sebagai root → sandbox Chromium
+    menolak start). Buka Brave dengan perintah `brave` (`INSTALL_BRAVE=0` untuk lewati)
+2c. Upterm: `upterm` dari rilis resmi GitHub → `upterm host --accept -- bash`
+    bikin sesi SSH temporer tanpa perlu sshd/key sama sekali (dipakai `menu.sh` opsi 2)
 3. Tailscale (install + login `--ssh`) + `tailscale serve` → `https://<mesin>.ts.net`
 4. OpenCode (install + PATH)
 5. SSH: **tidak dipasang** — akses lewat Tailscale SSH (ditangani tailscaled);
@@ -57,6 +65,28 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 6. Web toko roti: `python3 -m http.server` di `/root/toko-roti`
 7. Tunnel publik cloudflared (URL disimpan di `/root/cloudflared-url.txt`)
 8. GitHub: `gh login`, identitas git, auto-commit + push `toko-roti` dan script ini
+
+## Menu interaktif
+
+Selain `setup.sh`, repo ini berisi `menu.sh` — menu simpel dengan tiga opsi.
+Sudah dipasang otomatis sebagai `/root/menu.sh` (symlink) tiap `setup.sh` jalan:
+
+```bash
+bash /root/menu.sh
+```
+
+| Opsi | Isi |
+|---|---|
+| 1 | **Install keseluruhan** → jalankan `setup.sh` (pulihkan mesin dari nol) |
+| 2 | **Generate SSH** → `upterm host --accept -- bash` — cetak command SSH temporer, bagikan command-nya ke siapa pun yang mau ikut shell yang sama (sesi mati sendiri kalau host-nya keluar) |
+| 3 | **Keluar** |
+
+Ambil `menu.sh` saja tanpa ikut `setup.sh`:
+
+```bash
+curl -fsSL -o menu.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/main/menu.sh
+bash menu.sh
+```
 
 ## Catatan penting
 
