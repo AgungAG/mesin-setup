@@ -63,7 +63,10 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
     bikin sesi SSH temporer tanpa perlu sshd/key sama sekali (dipakai `menu.sh`
     opsi 3, lengkap dengan auto-copy command SSH ke clipboard)
 3. Tailscale (install + login `--ssh`) + `tailscale serve` → `https://<mesin>.ts.net`
-4. OpenCode (install + PATH)
+4. OpenCode: install + PATH + **service background `opencode serve` dijaga
+   supervisor** (`25-opencode.conf`, auto-start tiap boot) — inilah "otak"
+   yang dipanggil bot Telegram lewat API lokal, jadi bot langsung bisa
+   menjawab begitu setup selesai
 5. SSH: **tidak dipasang** — akses lewat Tailscale SSH (ditangani tailscaled);
    kalau `openssh-server` kepasang (misal dari image) script ini membersihkannya
 6. Web toko roti: `python3 -m http.server` di `/root/toko-roti`
@@ -71,7 +74,9 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 8. GitHub: `gh login`, identitas git, auto-commit + push `toko-roti` dan script ini
 9. Bot Telegram: bot AI di `@<bot>_bot` → dijawab model **gratis** OpenCode
    (MiMo/DeepSeek/GLM/dll), dijaga supervisor (`30-tgbot.conf`). Perintah:
-   `/new` `/models` `/model` `/id` `/help`
+   `/new` `/models` `/model` `/id` `/help` — **langsung jalan otomatis** begitu
+   `setup.sh` selesai (tidak perlu start manual), lengkap dengan service
+   OpenCode-nya (lihat poin 4)
 
 ## Bot Telegram — kode bersih, rahasia lokal
 
@@ -99,6 +104,11 @@ chmod 600 /root/.machine-secrets
 
 bash setup.sh        # bot.py disalin dari repo + config dibuat + supervisor jalan
 ```
+
+Begitu `setup.sh` selesai, bot **langsung jalan otomatis** — begitu juga
+service OpenCode (`opencode serve`) yang diajaknya menjawab, ikut dijaga
+supervisor (`supervisorctl status` → `opencode-serve` + `tg-opencode-bot`).
+Tidak ada langkah start manual sama sekali.
 
 Catatan: `config.json` dibuat ulang tiap run → kalau mau ganti model default /
 chat id, ubah lewat `.machine-secrets` (bukan edit `config.json` manual).
@@ -144,9 +154,9 @@ bash menu.sh
   tailscaled dengan identitas Tailscale. Kalau suatu saat butuh sshd beneran:
   `apt-get install -y openssh-server` (jalankan `bash setup.sh` lagi untuk
   membuangnya lagi).
-- **Semua daemon (tailscaled, web, tunnel) dijaga supervisord**, bukan
-  `nohup &` manual — jadi ikut bangun sendiri tiap container hidup.
-  Cek: `supervisorctl status`.
+- **Semua daemon (tailscaled, web, tunnel, service OpenCode, bot Telegram)
+  dijaga supervisord**, bukan `nohup &` manual — jadi ikut bangun sendiri
+  tiap container hidup. Cek: `supervisorctl status`.
 - Desktop/VNC/nginx itu urusan image bawaan, tidak disentuh script ini.
 - Secret disimpan di `/root/.machine-secrets` (`chmod 600`) — **jangan pernah
   di-commit ke git**.

@@ -19,7 +19,10 @@
 #                       -- bash`) biar orang lain bisa ikut di shell yang sama.
 #                       Dipakai oleh menu interaktif menu.sh (opsi 3).
 #   3. Tailscale      : install + tailscaled jalan + login (--ssh)
-#   4. OpenCode       : install + PATH di .bashrc
+#   4. OpenCode       : install + PATH di .bashrc + service background
+#                       (`opencode serve --service`) dijaga supervisor
+#                       (25-opencode.conf) — bot Telegram butuh service ini
+#                       buat menjawab, jadi sudah nyala sejak boot
 #   5. SSH            : TIDAK dipasang — akses masuk lewat Tailscale SSH
 #   6. Web toko roti  : http.server :8000 di /root/toko-roti
 #   7. Akses online   : tailscale serve (URL tetap) + tunnel cloudflared (opsional)
@@ -30,9 +33,11 @@
 #                       token/chat id dibuat lokal dari env / .machine-secrets.
 #
 # CARA KERJA PENTING:
-#   tailscaled, web server, dan tunnel dijaga SUPERVISORD — yang memang
-#   sudah jalan sejak container hidup dan auto-restart. Bukan `nohup &` manual.
-#   Jadi service ikut bangun sendiri tiap mesin hidup, tanpa diapa-apain.
+#   tailscaled, web server, tunnel, service OpenCode, dan bot Telegram
+#   dijaga SUPERVISORD — yang memang sudah jalan sejak container hidup dan
+#   auto-restart. Bukan `nohup &` manual. Jadi service ikut bangun sendiri
+#   tiap mesin hidup, tanpa diapa-apain — termasuk bot Telegram + service
+#   OpenCode yang diajaknya (langsung bisa menjawab begitu setup selesai).
 #   Desktop/VNC/nginx itu urusan image bawaan — script ini tidak menyentuhnya.
 #
 # SSH:
@@ -696,6 +701,14 @@ remove_sshd() {
 resolve_binaries() {
     TSD_BIN="$(command -v tailscaled || echo /usr/sbin/tailscaled)"
     PY_BIN="$(command -v python3 || echo /usr/bin/python3)"
+    # opencode: PATH dulu (install_opencode menambahkannya), kalau tidak ada
+    # jatuh ke lokasi instalasi root — binary inilah yang dijaga supervisor
+    # sebagai service OpenCode (dibutuhkan bot Telegram buat menjawab).
+    OC_BIN="$(command -v opencode || true)"
+    if [ -z "$OC_BIN" ]; then
+        OC_BIN="$OPENCODE_DIR/opencode"
+        [ -x "$OC_BIN" ] || OC_BIN="${HOME:-/root}/.opencode/bin/opencode"
+    fi
     # tailscaled yang masih dijalankan manual (belum diawasi supervisor)
     TAILSCALE_STRAY=0
     if ! supervisor_has tailscaled && pgrep -x tailscaled >/dev/null 2>&1; then
@@ -752,6 +765,17 @@ take_over_strays() {
         pkill -f 'cloudflared tunnel --url' || true
         wait_gone -f 'cloudflared tunnel --url'
     fi
+
+    # opencode serve yang nyala manual (hasil `opencode service start`, lazily
+    # dari bot) → serahkan ke supervisor supaya ikut bangun tiap boot. Kalau
+    # dibiarkan, proses barunya bentrok port dengan yang lama → FATAL.
+    if [ -f "$SUPERVISOR_DIR/25-opencode.conf" ] && ! supervisor_has opencode-serve \
+        && pgrep -f 'opencode serve' >/dev/null 2>&1; then
+        warn "Hentikan opencode serve manual → pindah ke supervisor (balasan bot bisa gagal 1x)"
+        [ -x "${OC_BIN:-}" ] && "$OC_BIN" service stop >/dev/null 2>&1 || true
+        pkill -f 'opencode serve' || true
+        wait_gone -f 'opencode serve'
+    fi
 }
 
 write_supervisor_confs() {
@@ -803,6 +827,36 @@ stdout_logfile_maxbytes=10485760
 stdout_logfile_backups=3
 environment=HOME="/root",USER="root"
 EOF
+
+    # Service OpenCode (opencode serve --service) — "otak" yang dipanggil bot
+    # Telegram lewat API lokal (port + password dibaca bot.py dari
+    # ~/.local/state/opencode/service.json, ditulis binary ini saat start).
+    # Tanpa ini bot jalan tapi TIDAK BISA menjawab: dia baru menyalakan
+    # service saat pesan pertama — lambat, dan kalau service.json belum
+    # pernah ada bot bahkan belum bisa start (lihat oc_conn di bot.py).
+    # priority 38 < 40 (bot) → service sudah nyala dulu sebelum bot polling.
+    if [ -x "${OC_BIN:-}" ]; then
+        cat > "$SUPERVISOR_DIR/25-opencode.conf" <<EOF
+[program:opencode-serve]
+priority=38
+autostart=true
+autorestart=true
+command=${OC_BIN} serve --service
+startsecs=5
+stopsignal=TERM
+stopasgroup=true
+killasgroup=true
+redirect_stderr=true
+stdout_logfile=/var/log/opencode-serve.log
+stdout_logfile_maxbytes=10485760
+stdout_logfile_backups=3
+environment=HOME="/root",USER="root"
+EOF
+        log "Service OpenCode (opencode serve) ikut dipantau supervisor"
+    else
+        rm -f "$SUPERVISOR_DIR/25-opencode.conf"
+        warn "binary opencode tidak ditemukan → service OpenCode tidak dipasang ke supervisor"
+    fi
 
     if [ "$USE_CLOUDFLARED" = "1" ]; then
         cat > "$SUPERVISOR_DIR/20-cloudflared.conf" <<EOF
@@ -1140,6 +1194,24 @@ backup_kasir() {
 # =========================================================
 # 8b. BOT TELEGRAM → OPENCODE (MODEL GRATIS)
 # =========================================================
+# Nyalakan service OpenCode (opencode serve) supaya bot Telegram langsung
+# bisa menjawab — bukan nunggu start malas dari pesan pertama yang lambat
+# dan butuh service.json yang belum tentu ada. Kalau service-nya sudah dijaga
+# supervisor (conf 25-opencode.conf), dilewati: sudah nyala sejak boot.
+warm_opencode_service() {
+    local oc_bin="${OC_BIN:-}"
+    [ -n "$oc_bin" ] || oc_bin="$OPENCODE_DIR/opencode"
+    [ -x "$oc_bin" ] || return 0
+    if supervisor_has opencode-serve; then
+        log "Service OpenCode sudah jalan via supervisor"
+        return 0
+    fi
+    log "Nyalakan service OpenCode (biar bot Telegram langsung bisa menjawab)..."
+    if ! "$oc_bin" service start >/dev/null 2>&1; then
+        warn "opencode service start gagal → bot akan coba nyalakan sendiri saat pesan pertama"
+    fi
+}
+
 # Pisahkan kode dan rahasia:
 #   - bot.py → kode BERSIH, disimpan di repo publik ini (restore: git clone).
 #   - token + chat id → RAHASIA, dibuat lokal oleh fungsi ini dari env /
@@ -1331,12 +1403,17 @@ main() {
         install_opencode
         # Bot Telegram: tulis conf + terapkan LEWAT supervisor (reread/update
         # hanya menyentuh conf yang berubah) + start bot-nya saja.
+        resolve_binaries
         setup_telegram_bot
         if [ -f "$SUPERVISOR_DIR/30-tgbot.conf" ] && [ -S "$SUPERVISOR_RUN" ]; then
             supervisorctl reread >/dev/null 2>&1 || true
             supervisorctl update >/dev/null 2>&1 || true
             start_service tg-opencode-bot
         fi
+        # service OpenCode dinyalakan belakangan (best-effort, non-fatal):
+        # bot-nya sudah jalan duluan di atas, tapi tanpa service ini dia belum
+        # bisa menjawab — jadi dipanaskan setelah conf bot beres.
+        warm_opencode_service
         log "Mode tools selesai"
         return 0
     fi
@@ -1393,6 +1470,11 @@ main() {
     fi
 
     start_service site-server "cd ${SITE_DIR} && nohup ${PY_BIN} -m http.server ${SITE_PORT} --bind 0.0.0.0 >/var/log/site-server.log 2>&1 &"
+    # service OpenCode dulu (conf 25-opencode.conf) — bot butuh ini buat menjawab
+    if [ -f "$SUPERVISOR_DIR/25-opencode.conf" ]; then
+        start_service opencode-serve
+    fi
+    warm_opencode_service
     # bot Telegram: hanya kalau conf-nya ada (token kosong → conf dibuang di atas)
     if [ -f "$SUPERVISOR_DIR/30-tgbot.conf" ]; then
         start_service tg-opencode-bot
@@ -1445,6 +1527,9 @@ summary() {
     fi
     echo "  Web lokal     : http://localhost:${SITE_PORT}   (dir: ${SITE_DIR})"
     echo "  OpenCode      : $(command -v opencode 2>/dev/null || echo "$OPENCODE_DIR/opencode")"
+    if [ -f "$SUPERVISOR_DIR/25-opencode.conf" ]; then
+        echo "  OpenCode svc  : opencode serve (dijaga supervisor → bot langsung bisa jawab)"
+    fi
     if [ -f "$SUPERVISOR_DIR/30-tgbot.conf" ] && [ -n "$TG_BOT_TOKEN" ]; then
         echo "  Bot Telegram  : $(grep -o 'directory=.*' "$SUPERVISOR_DIR/30-tgbot.conf" | cut -d= -f2)  (chat id: ${TG_CHAT_IDS:-belum ada})"
     fi
@@ -1464,8 +1549,8 @@ summary() {
     fi
     echo
     echo "Catatan:"
-    echo "  • tailscaled/web/tunnel dijaga supervisord → ikut bangun sendiri"
-    echo "    tiap container hidup. Cek: supervisorctl status"
+    echo "  • tailscaled/web/tunnel/service OpenCode/bot Telegram dijaga supervisord"
+    echo "    → ikut bangun sendiri tiap container hidup. Cek: supervisorctl status"
     echo "  • Menu interaktif: bash /root/menu.sh → 1) install keseluruhan"
     echo "    2) tools: gh+opencode+Brave+upterm  3) generate SSH (auto-copy)  4) keluar."
     echo "  • URL https://...ts.net hanya bisa dibuka dari device yang sudah masuk"

@@ -99,27 +99,52 @@ OC_CONFIG_PW = os.path.expanduser("~/.config/opencode/service.json")
 
 
 def oc_conn():
-    """Kembalikan (base_url, password) untuk service OpenCode."""
-    try:
-        with open(OC_STATE) as f:
-            d = json.load(f)
-        if d.get("url") and d.get("password"):
-            return d["url"].rstrip("/"), d["password"]
-    except (OSError, ValueError):
-        pass
-    try:
-        with open(OC_CONFIG_PW) as f:
-            pw = json.load(f)["password"]
-        return OC_URL, pw
-    except (OSError, ValueError) as e:
-        raise RuntimeError("konfigurasi OpenCode tidak ditemukan: %s" % e)
+    """Kembalikan (base_url, password) untuk service OpenCode.
+
+    Service-nya dijaga supervisor (setup.sh: 25-opencode.conf) dan biasanya
+    sudah nyala sejak boot. Tapi kalau service.json belum pernah ada (mesin
+    baru, service belum sempat start), nyalakan dulu service-nya dan baca
+    ulang file registrasinya — tanpa ini bot selalu menjawab "konfigurasi
+    OpenCode tidak ditemukan" karena start_service tidak pernah keburu
+    dipanggil (oc_conn gagal duluan di luar blok retry oc()).
+    """
+    for attempt in (0, 1):
+        try:
+            with open(OC_STATE) as f:
+                d = json.load(f)
+            if d.get("url") and d.get("password"):
+                return d["url"].rstrip("/"), d["password"]
+        except (OSError, ValueError):
+            pass
+        try:
+            with open(OC_CONFIG_PW) as f:
+                pw = json.load(f)["password"]
+            return OC_URL, pw
+        except (OSError, ValueError):
+            pass
+        if attempt == 0:
+            start_service()  # service.json baru ditulis opencode saat start
+            time.sleep(3)
+    raise RuntimeError(
+        "service OpenCode belum terdaftar — jalankan: opencode service start"
+    )
 
 
 def start_service():
     """Nyalakan service OpenCode (mis. baru boot, bot nyala duluan)."""
+    import shutil
     import subprocess
 
-    for cand in ("/root/.opencode/bin/opencode", "opencode"):
+    # jangan hardcode /root — HOME-nya bisa beda (mis. diuji / dijalankan user
+    # lain); jalur instalasi resmi opencode ada di ~/.opencode/bin
+    cands = [os.path.expanduser("~/.opencode/bin/opencode")]
+    which = shutil.which("opencode")
+    if which:
+        cands.append(which)
+
+    for cand in cands:
+        if not (os.path.isfile(cand) and os.access(cand, os.X_OK)):
+            continue
         try:
             r = subprocess.run(
                 [cand, "service", "start"],
