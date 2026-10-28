@@ -9,13 +9,15 @@
 #                              web toko roti, tunnel, GitHub). Kalau setup.sh
 #                              belum ada — misal habis reset, yang di-download
 #                              cuma menu.sh — filenya diambil otomatis dari
-#                              GitHub dulu.
+#                              GitHub dulu. SELESAI → otomatis lanjut ke
+#                              langkah opsi 3 (generate SSH upterm).
 #   2) apt update + gh + opencode + Brave + upterm
 #                           → `bash setup.sh tools` (mode ringan): refresh
 #                              repo lalu pasang gh, opencode, Brave, upterm,
 #                              + setup bot Telegram (config + supervisor).
 #                              Tidak menyentuh service/supervisor lain →
-#                              aman kapan saja.
+#                              aman kapan saja. SELESAI → otomatis lanjut ke
+#                              langkah opsi 3 (generate SSH upterm).
 #   3) Generate SSH         → upterm host --accept -- bash. Begitu command
 #                              SSH tercetak, OTOMATIS disalin ke clipboard
 #                              (OSC 52 ke terminal + xclip di desktop VNC)
@@ -104,6 +106,9 @@ install_all() {
     ensure_setup_sh || return 0
     log "Install keseluruhan: bash $SETUP_SH"
     laporkan_status bash "$SETUP_SH"
+    # Setelah setup penuh selesai, otomatis lanjut ke langkah opsi 3 —
+    # begitu upterm terpasang, sesi SSH langsung dibuat + auto-copy.
+    lanjut_generate_ssh
 }
 
 # --- Opsi 2 ------------------------------------------------------------
@@ -112,6 +117,17 @@ install_all() {
 install_tools() {
     ensure_setup_sh || return 0
     laporkan_status bash "$SETUP_SH" tools
+    # Sama seperti opsi 1: otomatis lanjut ke langkah opsi 3 (upterm sudah
+    # dipasang mode tools → sesi SSH langsung bisa dibuat).
+    lanjut_generate_ssh
+}
+
+# Otomatis jalankan langkah opsi 3 setelah opsi 1/2 selesai.
+# Kalau upterm belum terpasang (install gagal/offline), host_session sendiri
+# yang memberi peringatan — opsi lain tetap bisa dipakai.
+lanjut_generate_ssh() {
+    log "Lanjut otomatis ke opsi 3: generate SSH (upterm) + copy clipboard..."
+    host_session
 }
 
 # Jalankan setup.sh lalu TAMPILKAN kalau dia berhenti dengan status gagal.
@@ -295,9 +311,9 @@ while true; do
     cat <<'EOF'
 
   +-- mesin-setup ----------------------------------+
-  |  1) Install keseluruhan (setup.sh)              |
+  |  1) Install keseluruhan (lalu otomatis ke 3)    |
   |  2) apt update + gh + opencode + Brave + upterm |
-  |     (+ bot Telegram)                            |
+  |     (+ bot Telegram, lalu otomatis ke 3)        |
   |  3) Generate SSH (upterm) + copy clipboard      |
   |  4) List sesi upterm yang aktif                  |
   |  5) Stop semua sesi upterm aktif                 |

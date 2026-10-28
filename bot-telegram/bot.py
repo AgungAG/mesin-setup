@@ -4,6 +4,8 @@
 Cara kerja:
 - Long-polling getUpdates (tanpa webhook, tanpa dependensi eksternal).
 - Tiap chat Telegram punya sesi OpenCode sendiri (percakapan berkelanjutan).
+- Semua balasan model SELALU dalam Bahasa Indonesia (instruksi bahasa
+  disuntik ke tiap prompt — lihat LANG_INSTR).
 - Perintah: /new /model /models /id /help
 """
 import base64
@@ -44,6 +46,15 @@ HELP_TEXT = (
     "/model <nomor atau id> - ganti model\n"
     "/id - tampilkan ID chat Anda\n"
     "/help - bantuan ini"
+)
+
+# Instruksi bahasa: disuntik ke TIAP prompt model supaya balasan selalu
+# Bahasa Indonesia — walau user menulis pakai bahasa lain (Inggris, dll).
+# Bisa diganti lewat config.json ("language_instruction") tanpa edit kode.
+LANG_INSTR = CONFIG.get(
+    "language_instruction",
+    "ATURAN WAJIB BAHASA: Selalu balas dalam Bahasa Indonesia yang baik dan "
+    "benar, apapun bahasa yang dipakai user. Jangan pernah ganti bahasa.",
 )
 
 # ---------------------------------------------------------------- state ----
@@ -373,8 +384,13 @@ def handle_message(msg):
         typing = Typing(chat_id)
         typing.start()
         try:
+            # Instruksi bahasa disuntik di depan pesan user → model selalu
+            # menjawab Bahasa Indonesia (pengingat di tiap prompt, jadi juga
+            # berlaku lagi setelah /new atau ganti model).
             reply, failed = ask_model(
-                sid, text, CONFIG.get("prompt_timeout", 600)
+                sid,
+                "%s\n\nUser: %s" % (LANG_INSTR, text),
+                CONFIG.get("prompt_timeout", 600),
             )
         except Exception as e:  # noqa: BLE001 - laporkan semua error ke chat
             reply, failed = "Terjadi error: %s" % e, True
