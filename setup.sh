@@ -1272,17 +1272,21 @@ PYEOF
     log "config bot Telegram ditulis ulang → $conf (chmod 600, dari .machine-secrets)"
 
     # Permission OpenCode: tanpa ini sesi bot bisa macet nunggu konfirmasi
-    # tool (edit/bash). Hanya dibuat kalau belum ada — config user tidak ditimpa.
+    # tool (edit/bash). Tool `question` juga dimatikan: dia tool interaktif
+    # (muncul pilihan tombol di UI) yang lewat bot Telegram tak pernah bisa
+    # dijawab → sesi tak pernah idle → /wait menggantung sampai timeout.
+    # Hanya dibuat kalau belum ada — config user tidak ditimpa.
     local oc_cfg="/root/.config/opencode/opencode.json"
     if [ ! -f "$oc_cfg" ]; then
         mkdir -p "$(dirname "$oc_cfg")"
         cat > "$oc_cfg" <<'OCEOF'
 {
   "$schema": "https://opencode.ai/config.json",
-  "permission": { "edit": "allow", "bash": "allow", "webfetch": "allow" }
+  "permission": { "edit": "allow", "bash": "allow", "webfetch": "allow" },
+  "tools": { "question": false }
 }
 OCEOF
-        log "permission OpenCode → allow (biar bot tidak nunggu konfirmasi tool)"
+        log "permission OpenCode → allow + question dimatikan (biar bot tidak nunggu konfirmasi tool / timeout)"
     fi
 
     # Supervisor: bot ikut bangun sendiri tiap container hidup.
