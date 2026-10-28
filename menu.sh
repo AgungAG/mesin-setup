@@ -29,7 +29,14 @@
 #   5) Stop semua sesi      → hentikan SEMUA sesi upterm yang aktif (ada
 #         upterm              konfirmasi dulu; sesi terminal ini sendiri bisa
 #                              ikut terputus kalau terminalnya join via upterm).
-#   6) Keluar
+#   6) Tambah ID Telegram   → daftarkan ID chat Telegram baru ke bot, BOLEH
+#                              LEBIH DARI SATU sekaligus (pisah spasi/koma).
+#                              ID disimpan ke /root/.machine-secrets +
+#                              config.json bot, lalu bot di-restart → ID baru
+#                              langsung bisa chat. (ID Anda: kirim pesan ke
+#                              bot — balasan "Chat tidak terdaftar" memuat
+#                              "ID Anda: <angka>".)
+#   7) Keluar
 #
 # Pemakaian:
 #   bash /root/menu.sh        (jalur pendek; symlink ke mesin-setup/menu.sh)
@@ -50,6 +57,10 @@ SETUP_SH="${SCRIPT_DIR}/setup.sh"
 [ -f "$SETUP_SH" ] || SETUP_SH="/root/setup.sh"
 SETUP_URL="https://raw.githubusercontent.com/AgungAG/mesin-setup/main/setup.sh"
 SSH_FILE="/root/upterm-ssh.txt"
+# Dipakai opsi 6 (tambah ID Telegram): tempat secret setup.sh + config bot
+# (keduanya harus ikut diperbarui supaya ID tidak hilang kena reset).
+SECRET_FILE="/root/.machine-secrets"
+TG_BOT_DIR="/root/tg-opencode-bot"
 
 log()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
@@ -306,6 +317,119 @@ EOF
     return 0
 }
 
+# --- Opsi 6 ------------------------------------------------------------
+# Tambah ID chat Telegram secara manual — BOLEH LEBIH DARI SATU sekaligus
+# (pisah spasi/koma). Kenapa dua tempat penyimpanan?
+#   1. $SECRET_FILE (TG_CHAT_IDS=...) → dibaca load_secrets di setup.sh tiap
+#      restore → ID tidak hilang kena reset mesin.
+#   2. $TG_BOT_DIR/config.json (allowed_chat_ids) → yang benar-benar dibaca
+#      bot.py untuk memilih chat yang diizinkan masuk.
+# Setelah config ditulis, bot di-restart: bot.py membaca config saat START →
+# tanpa restart ID baru belum aktif.
+add_chat_ids() {
+    local py conf jawab cur="" all rc=0
+    py="$(command -v python3 || echo /usr/bin/python3)"
+    conf="$TG_BOT_DIR/config.json"
+
+    if [ ! -f "$conf" ] && [ ! -f "$SECRET_FILE" ]; then
+        warn "bot Telegram belum pernah di-setup → jalankan opsi 2 dulu"
+        return 0
+    fi
+
+    # ID yang sudah terdaftar (dari config bot bila ada)
+    if [ -f "$conf" ]; then
+        cur=$("$py" -c 'import json,sys
+try:
+    ids = json.load(open(sys.argv[1])).get("allowed_chat_ids") or []
+    print(" ".join(str(x) for x in ids))
+except Exception:
+    pass' "$conf" 2>/dev/null) || cur=""
+    fi
+    if [ -n "$cur" ]; then
+        log "ID sudah terdaftar: $cur"
+    else
+        log "Belum ada ID terdaftar (kirim pesan ke bot untuk melihat ID Anda)"
+    fi
+
+    while true; do
+        read -r -p "  ID baru (pisah spasi/koma, boleh lebih dari satu; kosong = batal): " jawab || jawab=""
+        jawab="${jawab//,/ }"
+        if [ -z "${jawab// }" ]; then
+            log "Dibatalkan — tidak ada ID ditambahkan"
+            return 0
+        fi
+        # semua token wajib angka; minus di depan dibolehkan untuk ID grup
+        if printf '%s\n' $jawab | grep -qEv '^-?[0-9]+$'; then
+            warn "Input harus ANGKA saja (ID grup boleh minus, mis. -1001234567) — ulangi"
+            continue
+        fi
+        break
+    done
+
+    # gabung ID lama + baru, buang duplikat (ID baru di belakang)
+    all=$(printf '%s\n' $cur $jawab | awk 'NF && !seen[$0]++ {printf "%s%s", sep, $0; sep=","}')
+
+    # 1) simpan permanen ke .machine-secrets (format NAME=value, chmod 600)
+    if [ -f "$SECRET_FILE" ]; then
+        rc=0
+        grep -v '^TG_CHAT_IDS=' "$SECRET_FILE" > "$SECRET_FILE.tmp" 2>/dev/null || rc=$?
+        if [ "$rc" -le 1 ]; then
+            chmod 600 "$SECRET_FILE.tmp" 2>/dev/null || true
+            mv -f "$SECRET_FILE.tmp" "$SECRET_FILE"
+        else
+            rm -f "$SECRET_FILE.tmp"
+            warn "$SECRET_FILE gagal dibaca → ID belum tersimpan permanen"
+        fi
+    fi
+    if printf 'TG_CHAT_IDS=%s\n' "$all" >> "$SECRET_FILE" 2>/dev/null; then
+        chmod 600 "$SECRET_FILE"
+        log "TG_CHAT_IDS disimpan di $SECRET_FILE (ikut pulih tiap reset)"
+    else
+        warn "menulis $SECRET_FILE gagal (permission?) → ID hanya aktif sampai restore berikutnya"
+    fi
+
+    # 2) tulis ke config.json bot (RAHASIA → chmod 600, tulis atomik)
+    if [ -f "$conf" ]; then
+        if "$py" - "$conf" "$all" <<'PYEOF'
+import json, os, sys
+path, raw = sys.argv[1], sys.argv[2]
+ids = [int(x) for x in raw.split(",") if x.strip()]
+with open(path) as f:
+    cfg = json.load(f)
+cfg["allowed_chat_ids"] = ids
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PYEOF
+        then
+            log "allowed_chat_ids diperbarui → $conf"
+        else
+            warn "menulis $conf gagal → jalankan opsi 2 untuk memperbarui config bot"
+            return 0
+        fi
+    else
+        warn "$conf tidak ada → jalankan opsi 2; ID tetap tersimpan di $SECRET_FILE"
+        return 0
+    fi
+
+    # 3) restart bot → config baru terbaca (dibaca bot.py saat start)
+    if [ -S /var/run/supervisor.sock ]; then
+        if supervisorctl restart tg-opencode-bot >/dev/null 2>&1 \
+            || supervisorctl start tg-opencode-bot >/dev/null 2>&1; then
+            log "Bot Telegram di-restart → ID baru langsung bisa chat: $all"
+        else
+            warn "restart bot gagal → cek: supervisorctl status tg-opencode-bot"
+        fi
+    else
+        warn "supervisor tidak jalan → ID aktif setelah bot dinyalakan lagi (opsi 2)"
+        log "ID tersimpan: $all"
+    fi
+    return 0
+}
+
 # --- Menu --------------------------------------------------------------
 while true; do
     cat <<'EOF'
@@ -317,17 +441,19 @@ while true; do
   |  3) Generate SSH (upterm) + copy clipboard      |
   |  4) List sesi upterm yang aktif                  |
   |  5) Stop semua sesi upterm aktif                 |
-  |  6) Keluar                                      |
+  |  6) Tambah ID Telegram (boleh lebih dari satu)   |
+  |  7) Keluar                                      |
   +-------------------------------------------------+
 EOF
-    read -r -p "  Pilih [1-6]: " pilih || { echo; pilih=6; }
+    read -r -p "  Pilih [1-7]: " pilih || { echo; pilih=7; }
     case "$pilih" in
         1)      install_all ;;
         2)      install_tools ;;
         3)      host_session ;;
         4)      list_sessions ;;
         5)      stop_sessions ;;
-        6|q|Q)  log "Keluar."; exit 0 ;;
-        *)      warn "Pilihan tidak dikenal: '$pilih' (pakai 1/2/3/4/5/6)" ;;
+        6)      add_chat_ids ;;
+        7|q|Q)  log "Keluar."; exit 0 ;;
+        *)      warn "Pilihan tidak dikenal: '$pilih' (pakai 1/2/3/4/5/6/7)" ;;
     esac
 done
