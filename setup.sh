@@ -107,7 +107,7 @@
 #                               mati); kalau dari sesi biasa, log-nya otomatis
 #                               dialihkan ke /root/setup-takeover.log.
 #   DEV_SESSION=oce             Nama tmux session yang disiapkan.
-#   KEEPALIVE_INTERVAL=60       Jeda (detik) siklus session-keepalive —
+#   KEEPALIVE_INTERVAL=30       Jeda (detik) siklus session-keepalive —
 #                               gerak pointer + cek layar/tmux/Tailscale.
 #                               Default 60; mis. 300 kalau mau lebih jarang.
 #
@@ -1495,13 +1495,16 @@ setup_keepalive() {
 # Dibuat otomatis oleh setup.sh — jangan diedit manual (ditimpa ulang tiap run).
 # Session keep-alive: mesin SELALU terlihat dipakai → sesi tidak pernah
 # keluar/blank/lock otomatis. Dijaga supervisord (40-keepalive.conf).
-INTERVAL="${KEEPALIVE_INTERVAL:-60}"
+INTERVAL="${KEEPALIVE_INTERVAL:-30}"
 SECRET_FILE="/root/.machine-secrets"
 DEV_SESSION="${DEV_SESSION:-oce}"
+TS_WARN_EVERY=20
+
+log() { printf '%s [keepalive] %s\n' "$(date '+%F %T')" "$*"; }
 
 # (1)+(2)+(3) — cari DISPLAY yang hidup; kalau tidak ada X, lanjut tugas lain
 x_refresh() {
-    local d
+    local d dx dy
     for d in "${DISPLAY:-}" ":1.0" ":0.0"; do
         [ -n "$d" ] || continue
         DISPLAY="$d" xset q >/dev/null 2>&1 || continue
@@ -1519,14 +1522,31 @@ x_refresh() {
         if command -v xscreensaver-command >/dev/null 2>&1; then
             xscreensaver-command -exit 2>/dev/null || true
         fi
-        # "interaksi manusia": pointer 2px bolak-balik → timer idle selalu reset
+        # "interaksi manusia": pointer digeser acak 2-11px lalu dikembalikan,
+        # ditutup ketukan Shift_L (modifier saja → tidak mengetik karakter
+        # apa pun). xdotool memakai XTEST → event-nya sama dengan input
+        # asli, jadi timer idle yang menghitung mouse MAUPUN keyboard selalu
+        # reset. Arah/jarak diganti tiap siklus supaya tidak pola identik.
         if command -v xdotool >/dev/null 2>&1; then
-            DISPLAY="$d" xdotool mousemove_relative -- 2 2 2>/dev/null || true
+            dx=$(( (RANDOM % 10) + 2 )); dy=$(( (RANDOM % 10) + 2 ))
+            [ $(( RANDOM % 2 )) -eq 0 ] && dx=$((-dx))
+            [ $(( RANDOM % 2 )) -eq 0 ] && dy=$((-dy))
+            DISPLAY="$d" xdotool mousemove_relative -- "$dx" "$dy" 2>/dev/null || true
             sleep 1
-            DISPLAY="$d" xdotool mousemove_relative -- -2 -2 2>/dev/null || true
+            DISPLAY="$d" xdotool mousemove_relative -- "$((-dx))" "$((-dy))" 2>/dev/null || true
+            DISPLAY="$d" xdotool key --clearmodifiers Shift_L 2>/dev/null || true
         fi
+        if [ -z "${X_OK_LOGGED:-}" ]; then
+            log "X aktif (DISPLAY=$d): screensaver/DPMS dimatikan + gerakan simulasi jalan"
+            X_OK_LOGGED=1
+        fi
+        X_DOWN_LOGGED=""
         return 0
     done
+    if [ -z "${X_DOWN_LOGGED:-}" ]; then
+        log "PERINGATAN: tidak ada DISPLAY hidup → gerak pointer dilewati (xset dicoba lagi tiap siklus)"
+        X_DOWN_LOGGED=1
+    fi
     return 0
 }
 
@@ -1538,18 +1558,45 @@ tmux_refresh() {
     return 0
 }
 
-# (5) Tailscale: keluar otomatis (key expiry/logout) → login ulang sendiri
+# peringatan Tailscale: maximal 1 baris tiap TS_WARN_EVERY siklus (anti log penuh)
+_ts_warn_n=0
+ts_warn() {
+    _ts_warn_n=$((_ts_warn_n + 1))
+    [ $((_ts_warn_n % TS_WARN_EVERY)) -eq 1 ] || return 0
+    log "PERINGATAN: $*"
+    return 0
+}
+
+# (5) Tailscale: keluar otomatis (key expiry/logout) → login ulang sendiri.
+# Kalau TS_AUTHKEY belum ada, JANGAN diam — laporkan biar jelas kenapa mesin
+# terlihat "keluar". timeout: `tailscale up` bisa hang nunggu login interaktif.
 tailscale_refresh() {
     command -v tailscale >/dev/null 2>&1 || return 0
-    local prefs key
-    prefs=$(tailscale debug prefs 2>/dev/null) || return 0
-    printf '%s\n' "$prefs" | grep -q '"LoggedOut": *true' || return 0
-    [ -r "$SECRET_FILE" ] || return 0
+    local st key
+    # PENTING (bug lama): `tailscale debug prefs` selalu melaporkan
+    # "LoggedOut": false walau mesin sudah "Logged out" → deteksi keluar
+    # harus dari BackendState status (NeedsLogin), bukan dari prefs.
+    st=$(timeout 15 tailscale status --json 2>/dev/null) || st=""
+    if [ -n "$st" ]; then
+        printf '%s' "$st" | grep -q '"BackendState": *"NeedsLogin"' || return 0
+    else
+        timeout 15 tailscale status 2>/dev/null | grep -q '^Logged out' || return 0
+    fi
+    if [ ! -r "$SECRET_FILE" ]; then
+        ts_warn "Tailscale logged out dan $SECRET_FILE tidak ada → auto-login mustahil"
+        return 0
+    fi
     key=$(. "$SECRET_FILE" 2>/dev/null; printf '%s' "${TS_AUTHKEY:-}")
-    [ -n "$key" ] || return 0
-    tailscale up --auth-key="$key" --ssh --accept-dns=false 2>/dev/null \
-        || tailscale up --auth-key="$key" --ssh --accept-dns=false --reset 2>/dev/null \
-        || true
+    if [ -z "$key" ]; then
+        ts_warn "Tailscale logged out, TS_AUTHKEY kosong di $SECRET_FILE → isi dulu: TS_AUTHKEY=tskey-auth-... (dari https://login.tailscale.com/admin/settings/keys)"
+        return 0
+    fi
+    if timeout 45 tailscale up --auth-key="$key" --ssh --accept-dns=false 2>/dev/null \
+        || timeout 45 tailscale up --auth-key="$key" --ssh --accept-dns=false --reset 2>/dev/null; then
+        log "Tailscale login ulang OTOMATIS berhasil"
+    else
+        ts_warn "login Tailscale gagal (key expired/revoke?) → ganti TS_AUTHKEY di $SECRET_FILE"
+    fi
     return 0
 }
 
@@ -1562,6 +1609,17 @@ while true; do
 done
 EOF
     $SUDO install -m 755 "$tmp" "$KEEPALIVE_BIN"
+    rm -f "$tmp"
+
+    # Shell login baru: pastikan TMOUT (auto-logout idle) tidak aktif —
+    # pelengkap gerak pointer di atas, untuk jaga-jaga image bikin TMOUT.
+    tmp=$(mktemp)
+    cat > "$tmp" <<'EOF'
+# Dibuat otomatis oleh setup.sh — anti auto-logout shell karena idle.
+# TMOUT (detik tanpa ketikan sebelum bash keluar sendiri) dipastikan mati.
+unset TMOUT
+EOF
+    $SUDO install -m 644 "$tmp" /etc/profile.d/00-no-idle-logout.sh
     rm -f "$tmp"
 
     tmp=$(mktemp)
@@ -1585,7 +1643,7 @@ environment=HOME="/root",USER="root",DISPLAY="${disp}"
 EOF
     $SUDO install -m 644 "$tmp" "$KEEPALIVE_CONF"
     rm -f "$tmp"
-    log "Keep-alive sesi → ${KEEPALIVE_BIN} + $(basename "$KEEPALIVE_CONF") (interval ${KEEPALIVE_INTERVAL:-60}s)"
+    log "Keep-alive sesi → ${KEEPALIVE_BIN} + $(basename "$KEEPALIVE_CONF") (interval ${KEEPALIVE_INTERVAL:-30}s)"
 }
 
 # =========================================================
