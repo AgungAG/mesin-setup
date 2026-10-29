@@ -18,11 +18,18 @@
 #   2c. Upterm        : upterm — bikin sesi SSH temporer (`upterm host --accept
 #                       -- bash`) biar orang lain bisa ikut di shell yang sama.
 #                       Dipakai oleh menu interaktif menu.sh (opsi 3).
+#   2d. TeraBox       : jendela aplikasi ANTI BLANK — wrapper `terabox` membuka
+#                       www.terabox.com lewat flag --app Chrome/Brave dengan
+#                       --no-sandbox (container root) + profil khusus
+#                       (~/.config/terabox-app) + anti-crash renderer, plus
+#                       ikon desktop. Buka: `terabox` atau ikon TeraBox.
 #   3. Tailscale      : install + tailscaled jalan + login (--ssh)
 #   4. OpenCode       : install + PATH di .bashrc + service background
 #                       (`opencode serve --service`) dijaga supervisor
 #                       (25-opencode.conf) — bot Telegram butuh service ini
 #                       buat menjawab, jadi sudah nyala sejak boot
+#   4a. Alias         : oce → opencode, age → bash /root/menu.sh — ditulis ke
+#                       /root/.bashrc (idempoten; ikut di mode tools)
 #   5. SSH            : TIDAK dipasang — akses masuk lewat Tailscale SSH
 #   6. Web toko roti  : http.server :8000 di /root/toko-roti
 #   7. Akses online   : tailscale serve (URL tetap) + tunnel cloudflared (opsional)
@@ -31,6 +38,13 @@
 #                       supervisor (30-tgbot.conf). bot.py disimpan sebagai
 #                       kode BERSIH di repo ini; rahasia TIDAK ikut ke GitHub —
 #                       token/chat id dibuat lokal dari env / .machine-secrets.
+#   10. Keep-alive    : session-keepalive (40-keepalive.conf) — jalan terus
+#                       sejak boot, bikin mesin SELALU terlihat dipakai manusia
+#                       supaya sesi tidak keluar otomatis: screensaver/DPMS X
+#                       dimatikan (bawaan image blank tiap 600 detik), pointer
+#                       digerakkan 2px tiap siklus (xdotool), tmux session
+#                       dibuat lagi kalau hilang, dan Tailscale login ulang
+#                       otomatis kalau keburu keluar (key expiry).
 #
 # CARA KERJA PENTING:
 #   tailscaled, web server, tunnel, service OpenCode, dan bot Telegram
@@ -46,14 +60,15 @@
 #   tetap ada (buat git ssh dan `tailscale ssh`). Alasan lengkap: remove_sshd.
 #
 # Pemakaian:
-#   bash setup.sh               Setup penuh dari nol.
-#   bash setup.sh tools         Mode ringan: apt update + install gh, opencode,
-#                               Brave, upterm + setup bot Telegram (conf
-#                               supervisor & start bot-nya saja — service lain
-#                               tidak disentuh). Dipakai menu.sh opsi 2.
-#   Menu interaktif (install / mode tools / generate SSH / list & stop sesi
-#   upterm / keluar):
-#     bash /root/menu.sh
+#   bash setup.sh               Setup penuh dari nol (Full Install).
+#   bash setup.sh tools         Mode ringan (Only Tools): apt update + install
+#                               gh, opencode, Brave, upterm, TeraBox, alias
+#                               oce/age + setup bot Telegram (conf supervisor &
+#                               start bot-nya saja — service lain tidak
+#                               disentuh). Dipakai menu.sh opsi 2.
+#   Menu interaktif (Full Install / Only Tools / Generate SSH (Upterm) /
+#   list & stop sesi upterm / keluar):
+#     bash /root/menu.sh        (atau singkat: age)
 #
 # RESTORE DARI NOL (mesin baru / habis reset, /root sudah bersih):
 #   curl -fsSL -o setup.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/main/setup.sh
@@ -92,6 +107,9 @@
 #                               mati); kalau dari sesi biasa, log-nya otomatis
 #                               dialihkan ke /root/setup-takeover.log.
 #   DEV_SESSION=oce             Nama tmux session yang disiapkan.
+#   KEEPALIVE_INTERVAL=60       Jeda (detik) siklus session-keepalive —
+#                               gerak pointer + cek layar/tmux/Tailscale.
+#                               Default 60; mis. 300 kalau mau lebih jarang.
 #
 set -euo pipefail
 
@@ -299,11 +317,14 @@ install_packages() {
     local need=() p
     # xclip: buat fitur copy-ke-clipboard di menu.sh opsi 3 (aktif kalau ada
     # DISPLAY — desktop VNC bawaan image; tanpa X tetap terpasang tapi diam).
-    for p in git tmux jq curl ca-certificates xclip; do
+    # xdotool: tangan "manusia" palsu buat session-keepalive (gerak pointer
+    # bolak-balik → timer idle X/aplikasi tidak pernah sampai logout/blank).
+    # x11-xserver-utils: xset → matikan screensaver/DPMS X.
+    for p in git tmux jq curl ca-certificates xclip xdotool x11-xserver-utils; do
         dpkg -s "$p" >/dev/null 2>&1 || need+=("$p")
     done
     if [ "${#need[@]}" -eq 0 ]; then
-        log "Paket dasar sudah lengkap (git tmux jq curl ca-certificates xclip)"
+        log "Paket dasar sudah lengkap (git tmux jq curl ca-certificates xclip xdotool xset)"
         return
     fi
     log "Install paket: ${need[*]}"
@@ -537,6 +558,99 @@ install_upterm() {
 }
 
 # =========================================================
+# 2d. TERABOX — jendela aplikasi ANTI BLANK
+# =========================================================
+# TeraBox tidak punya klien Linux resmi → dibuka sebagai "app window" lewat
+# flag --app Chrome/Brave (tanpa address bar), bukan tab biasa.
+#
+# Kenapa bisa blank / layar kosong saat dibuka, dan solusinya di wrapper bawah:
+#   1. --no-sandbox              container ini jalan sebagai ROOT → sandbox
+#                                Chromium menolak start = jendela kosong
+#                                (penyebab yang sama dengan wrapper Brave).
+#   2. --user-data-dir terpisah  profil khusus TeraBox → jendela MANDIRI dan
+#                                tidak berebut sesi Chrome yang sudah jalan
+#                                (app yang nebeng profil lama sering tidak
+#                                muncul / membuka tab kosong).
+#   3. --disable-dev-shm-usage   /dev/shm container kecil → renderer bisa
+#                                crash di tengah jalan (layar putih/hang).
+#   4. --disable-gpu             container tanpa GPU → pakai rendering
+#                                software supaya kompositornya jalan.
+# Browser dicari saat RUNTIME (bukan saat install) → wrapper tetap bisa
+# dibuat walau Chrome/Brave belum terpasang; kalau nol semua, wrapper
+# menolak dengan pesan jelas, bukan jendela blank.
+#
+# Idempoten: wrapper + ikon desktop ditulis ulang tiap run (isinya sama).
+# Profil korup (pernah blank) → reset lalu buka lagi:
+#   rm -rf /root/.config/terabox-app && terabox
+install_terabox() {
+    local wrapper="/usr/local/bin/terabox"
+    local desk="/usr/share/applications/terabox.desktop"
+    local tmp
+    tmp=$(mktemp)
+
+    # Wrapper: quoted heredoc → semua $VAR dibaca saat runtime, bukan di sini.
+    cat > "$tmp" <<'EOF'
+#!/usr/bin/env bash
+# Dibuat otomatis oleh setup.sh — jangan diedit manual (ditimpa ulang tiap run).
+# Buka TeraBox sebagai jendela aplikasi (tanpa address bar) — ANTI BLANK.
+URL="${TERABOX_URL:-https://www.terabox.com}"
+PROFILE="${TERABOX_PROFILE:-/root/.config/terabox-app}"
+BROWSER=""
+for b in google-chrome-stable google-chrome chromium-browser chromium brave-browser brave; do
+    if command -v "$b" >/dev/null 2>&1; then BROWSER="$b"; break; fi
+done
+if [ -z "$BROWSER" ]; then
+    echo "TeraBox: belum ada browser (Chrome/Brave) → jalankan dulu: bash /root/setup.sh tools" >&2
+    exit 1
+fi
+mkdir -p "$PROFILE"
+# Empat flag wajib biar tidak blank: no-sandbox (root), profil terpisah,
+# anti-crash /dev/shm, render software tanpa GPU.
+exec "$BROWSER" \
+    --no-sandbox \
+    --disable-dev-shm-usage \
+    --disable-gpu \
+    --user-data-dir="$PROFILE" \
+    --app="$URL" \
+    "$@"
+EOF
+    $SUDO install -m 755 "$tmp" "$wrapper"
+    rm -f "$tmp"
+
+    # Ikon desktop → buka dari menu aplikasi VNC tanpa perlu ketik terminal.
+    $SUDO mkdir -p /usr/share/applications
+    tmp=$(mktemp)
+    cat > "$tmp" <<'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=TeraBox
+GenericName=Cloud Storage
+Comment=TeraBox di jendela aplikasi (anti-blank, tanpa address bar)
+Exec=/usr/local/bin/terabox
+Terminal=false
+Categories=Network;FileTransfer;
+Icon=folder-remote
+StartupNotify=true
+EOF
+    $SUDO install -m 644 "$tmp" "$desk"
+    rm -f "$tmp"
+
+    # Safety net: pastikan flag anti-blank benar-benar ada di wrapper.
+    if grep -q -- '--no-sandbox' "$wrapper" && grep -q -- '--user-data-dir=' "$wrapper"; then
+        log "TeraBox → $wrapper + $desk (buka: terabox atau ikon TeraBox)"
+    else
+        warn "wrapper TeraBox tidak lengkap → cek $wrapper"
+    fi
+    if ! command -v google-chrome-stable >/dev/null 2>&1 \
+        && ! command -v google-chrome >/dev/null 2>&1 \
+        && ! command -v brave-browser >/dev/null 2>&1 \
+        && ! command -v brave >/dev/null 2>&1; then
+        warn "belum ada Chrome/Brave → TeraBox baru bisa dibuka setelah browser terpasang"
+    fi
+}
+
+# =========================================================
 # 3. TAILSCALE
 # =========================================================
 install_tailscale() {
@@ -646,18 +760,35 @@ install_opencode() {
     fi
     # Pastikan ada di PATH lewat .bashrc (aman kalau .bashrc ikut hilang kena reset).
     # $SUDO wajib: /root/.bashrc tidak bisa ditulis user biasa → tanpa ini
-    # `set -e` mematikan SELURUH script di sini (Mode tools tidak pernah selesai).
+    # `set -e` mematikan SELURUH script di sini (Only Tools tidak pernah selesai).
     if ! $SUDO grep -q '.opencode/bin' /root/.bashrc 2>/dev/null; then
         printf '\n# opencode\nexport PATH=/root/.opencode/bin:$PATH\n' \
             | $SUDO tee -a /root/.bashrc >/dev/null
     fi
-    # Alias singkat: oce = opencode. Ditulis sekali, dicek ulang tiap run.
+    export PATH="$OPENCODE_DIR:$PATH"
+    log "OpenCode: $(command -v opencode || echo "$OPENCODE_DIR/opencode")"
+}
+
+# =========================================================
+# 4a. ALIAS SINGKAT — oce & age
+# =========================================================
+# Satu step idempoten untuk dua alias harian di /root/.bashrc:
+#   oce → opencode             (CLI agent)
+#   age → bash /root/menu.sh   (menu interaktif)
+# Ditulis ulang hanya kalau belum ada → aman dijalankan berkali-kali, dan
+# alias yang sudah diedit user tidak ditimpa.
+# $SUDO wajib: /root/.bashrc tidak bisa ditulis user biasa (sama seperti
+# install_opencode) — tanpa ini `set -e` mematikan seluruh script.
+ensure_aliases() {
     if ! $SUDO grep -q "alias oce=" /root/.bashrc 2>/dev/null; then
         printf "\n# alias opencode\nalias oce='opencode'\n" \
             | $SUDO tee -a /root/.bashrc >/dev/null
     fi
-    export PATH="$OPENCODE_DIR:$PATH"
-    log "OpenCode: $(command -v opencode || echo "$OPENCODE_DIR/opencode")"
+    if ! $SUDO grep -q "alias age=" /root/.bashrc 2>/dev/null; then
+        printf "\n# alias menu.sh\nalias age='bash /root/menu.sh'\n" \
+            | $SUDO tee -a /root/.bashrc >/dev/null
+    fi
+    log "Alias siap: oce → opencode, age → bash /root/menu.sh (berlaku di shell baru)"
 }
 
 # =========================================================
@@ -1312,6 +1443,152 @@ EOF
 }
 
 # =========================================================
+# 8c. SESSION KEEP-ALIVE — sesi tidak pernah keluar otomatis
+# =========================================================
+# Daemon /usr/local/bin/session-keepalive yang dijaga supervisor
+# (40-keepalive.conf) → jalan sejak boot, auto-restart, ikut pulih tiap
+# reset (file ini juga dibuat ulang tiap setup dijalankan). Tugasnya bikin
+# mesin SELALU terlihat seperti sedang dipakai manusia supaya tidak ada
+# yang keluar sendiri:
+#   1. X screensaver + DPMS dimatikan (bawaan image: layar blank tiap
+#      600 detik → x11vnc/noVNC kelihatan "mati"). Hasil uji langsung di
+#      mesin ini: `xset q` menunjukkan Screen Saver timeout 600 — di sinilah
+#      dihentikan, plus xset s noblank/-dpms.
+#   2. Auto-lock desktop umum (GNOME/Cinnamon/MATE) dimatikan — best-effort,
+#      yang tidak terpasang dilewati diam. xscreensaver (kalau ada) dihentikan.
+#   3. Pointer digeser 2px bolak-balik tiap siklus via xdotool → timer idle
+#      X/aplikasi selalu reset, "ada interaksi" terus. Tanpa xdotool fitur ini
+#      dilewati; poin 1 tetap membuat layar tidak blank.
+#   4. tmux session dev ($DEV_SESSION) dibuat ulang kalau hilang.
+#   5. Tailscale login ulang OTOMATIS kalau keluar sendiri (key expiry /
+#      logout) — pakai TS_AUTHKEY dari $SECRET_FILE, tanpa campur tangan.
+# Semua langkah BEST-EFFORT: tool/X yang tidak ada → dilewati diam, daemon
+# tidak pernah mati sendiri. Interval: KEEPALIVE_INTERVAL (detik, default 60).
+# Idempoten: script + conf ditulis ulang tiap run (isinya sama).
+KEEPALIVE_BIN="/usr/local/bin/session-keepalive"
+KEEPALIVE_CONF="$SUPERVISOR_DIR/40-keepalive.conf"
+
+setup_keepalive() {
+    local disp tmp
+
+    # xdotool = "tangan" simulasi pointer. Dipasang kalau belum ada; gagal
+    # (offline) bukan masalah → fitur gerak pointer dilewati, yang lain jalan.
+    if ! command -v xdotool >/dev/null 2>&1; then
+        if DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq xdotool >/dev/null 2>&1; then
+            log "xdotool terpasang (simulasi gerakan pointer anti-idle)"
+        else
+            warn "xdotool gagal dipasang → simulasi pointer dilewati (layar tetap tidak blank via xset)"
+        fi
+    fi
+
+    # DISPLAY untuk service: yang sekarang dulu, lalu tebak dari socket X.
+    # (Kalau salah tebak, daemon tetap mencoba :1.0/:0.0 tiap siklus.)
+    disp="${DISPLAY:-}"
+    if [ -z "$disp" ] && [ -e /tmp/.X11-unix/X1 ]; then disp=":1.0"; fi
+    if [ -z "$disp" ] && [ -e /tmp/.X11-unix/X0 ]; then disp=":0.0"; fi
+    disp="${disp:-:1.0}"
+
+    tmp=$(mktemp)
+    # Quoted heredoc → $VAR di bawah dibaca saat RUNTIME oleh daemon.
+    cat > "$tmp" <<'EOF'
+#!/usr/bin/env bash
+# Dibuat otomatis oleh setup.sh — jangan diedit manual (ditimpa ulang tiap run).
+# Session keep-alive: mesin SELALU terlihat dipakai → sesi tidak pernah
+# keluar/blank/lock otomatis. Dijaga supervisord (40-keepalive.conf).
+INTERVAL="${KEEPALIVE_INTERVAL:-60}"
+SECRET_FILE="/root/.machine-secrets"
+DEV_SESSION="${DEV_SESSION:-oce}"
+
+# (1)+(2)+(3) — cari DISPLAY yang hidup; kalau tidak ada X, lanjut tugas lain
+x_refresh() {
+    local d
+    for d in "${DISPLAY:-}" ":1.0" ":0.0"; do
+        [ -n "$d" ] || continue
+        DISPLAY="$d" xset q >/dev/null 2>&1 || continue
+        # screensaver: matikan total (timeout → 0) dan jangan pernah blank
+        DISPLAY="$d" xset s off 2>/dev/null || true
+        DISPLAY="$d" xset s noblank 2>/dev/null || true
+        DISPLAY="$d" xset -dpms 2>/dev/null || true
+        # auto-lock desktop umum — hanya DE terpasang yang ikut, lainnya diam
+        if command -v gsettings >/dev/null 2>&1; then
+            gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null || true
+            gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
+            gsettings set org.cinnamon.desktop.screensaver lock-enabled false 2>/dev/null || true
+            gsettings set org.mate.screensaver lock-enabled false 2>/dev/null || true
+        fi
+        if command -v xscreensaver-command >/dev/null 2>&1; then
+            xscreensaver-command -exit 2>/dev/null || true
+        fi
+        # "interaksi manusia": pointer 2px bolak-balik → timer idle selalu reset
+        if command -v xdotool >/dev/null 2>&1; then
+            DISPLAY="$d" xdotool mousemove_relative -- 2 2 2>/dev/null || true
+            sleep 1
+            DISPLAY="$d" xdotool mousemove_relative -- -2 -2 2>/dev/null || true
+        fi
+        return 0
+    done
+    return 0
+}
+
+# (4) sesi tmux dev: hilang kena boot/reset → dibuat lagi
+tmux_refresh() {
+    command -v tmux >/dev/null 2>&1 || return 0
+    if tmux has-session -t "$DEV_SESSION" 2>/dev/null; then return 0; fi
+    tmux new-session -d -s "$DEV_SESSION" 2>/dev/null || true
+    return 0
+}
+
+# (5) Tailscale: keluar otomatis (key expiry/logout) → login ulang sendiri
+tailscale_refresh() {
+    command -v tailscale >/dev/null 2>&1 || return 0
+    local prefs key
+    prefs=$(tailscale debug prefs 2>/dev/null) || return 0
+    printf '%s\n' "$prefs" | grep -q '"LoggedOut": *true' || return 0
+    [ -r "$SECRET_FILE" ] || return 0
+    key=$(. "$SECRET_FILE" 2>/dev/null; printf '%s' "${TS_AUTHKEY:-}")
+    [ -n "$key" ] || return 0
+    tailscale up --auth-key="$key" --ssh --accept-dns=false 2>/dev/null \
+        || tailscale up --auth-key="$key" --ssh --accept-dns=false --reset 2>/dev/null \
+        || true
+    return 0
+}
+
+# Daemon: tanpa set -e → SATU langkah gagal tidak mematikan keep-alive.
+while true; do
+    x_refresh
+    tmux_refresh
+    tailscale_refresh
+    sleep "$INTERVAL"
+done
+EOF
+    $SUDO install -m 755 "$tmp" "$KEEPALIVE_BIN"
+    rm -f "$tmp"
+
+    tmp=$(mktemp)
+    cat > "$tmp" <<EOF
+; Dibuat otomatis oleh setup.sh (di-regenerate tiap setup dijalankan).
+; Keep-alive sesi: anti blank/lock/logout otomatis (lihat script-nya).
+[program:session-keepalive]
+priority=45
+autostart=true
+autorestart=true
+command=${KEEPALIVE_BIN}
+startsecs=3
+stopsignal=TERM
+stopasgroup=true
+killasgroup=true
+redirect_stderr=true
+stdout_logfile=/var/log/session-keepalive.log
+stdout_logfile_maxbytes=5242880
+stdout_logfile_backups=2
+environment=HOME="/root",USER="root",DISPLAY="${disp}"
+EOF
+    $SUDO install -m 644 "$tmp" "$KEEPALIVE_CONF"
+    rm -f "$tmp"
+    log "Keep-alive sesi → ${KEEPALIVE_BIN} + $(basename "$KEEPALIVE_CONF") (interval ${KEEPALIVE_INTERVAL:-60}s)"
+}
+
+# =========================================================
 # 9. BACKUP SCRIPT INI SENDIRI
 # =========================================================
 # /root/setup.sh = symlink ke /root/mesin-setup/setup.sh (repo GitHub), dan
@@ -1392,12 +1669,13 @@ start_dev_session() {
 main() {
     load_secrets
 
-    # Mode ringan `tools` (menu.sh opsi 2): cukup apt update + gh + opencode
-    # + Brave + upterm + setup bot Telegram. Sengaja berhenti DI SINI — tidak
-    # menyentuh service/supervisor LAIN (kecuali conf+start bot Telegram),
-    # jadi aman dijalankan kapan saja tanpa memutus sesi yang sedang jalan.
+    # Mode ringan `tools` (menu.sh opsi 2 — Only Tools): cukup apt update +
+    # gh + opencode + Brave + upterm + TeraBox + alias oce/age + setup bot
+    # Telegram. Sengaja berhenti DI SINI — tidak menyentuh service/supervisor
+    # LAIN (kecuali conf+start bot Telegram), jadi aman dijalankan kapan saja
+    # tanpa memutus sesi yang sedang jalan.
     if [ "${1:-}" = "tools" ]; then
-        log "Mode tools: apt update + gh + opencode + Brave + upterm + bot Telegram (tanpa setup penuh)"
+        log "Only Tools: apt update + gh + opencode + Brave + upterm + TeraBox + alias oce/age + bot Telegram (tanpa setup penuh)"
         reset_google_chrome_repo
         ensure_google_chrome_repo
         apt_update
@@ -1405,20 +1683,30 @@ main() {
         install_brave
         install_upterm
         install_opencode
+        install_terabox
+        ensure_aliases
         # Bot Telegram: tulis conf + terapkan LEWAT supervisor (reread/update
         # hanya menyentuh conf yang berubah) + start bot-nya saja.
         resolve_binaries
         setup_telegram_bot
-        if [ -f "$SUPERVISOR_DIR/30-tgbot.conf" ] && [ -S "$SUPERVISOR_RUN" ]; then
+        setup_keepalive
+        # Terapkan LEWAT supervisor (reread/update hanya menyentuh conf yang
+        # berubah) + start bot-nya dan keep-alive saja.
+        if [ -S "$SUPERVISOR_RUN" ]; then
             supervisorctl reread >/dev/null 2>&1 || true
             supervisorctl update >/dev/null 2>&1 || true
-            start_service tg-opencode-bot
+            if [ -f "$SUPERVISOR_DIR/30-tgbot.conf" ]; then
+                start_service tg-opencode-bot
+            fi
+            if [ -f "$SUPERVISOR_DIR/40-keepalive.conf" ]; then
+                start_service session-keepalive
+            fi
         fi
         # service OpenCode dinyalakan belakangan (best-effort, non-fatal):
         # bot-nya sudah jalan duluan di atas, tapi tanpa service ini dia belum
         # bisa menjawab — jadi dipanaskan setelah conf bot beres.
         warm_opencode_service
-        log "Mode tools selesai"
+        log "Only Tools selesai"
         return 0
     fi
 
@@ -1435,6 +1723,8 @@ main() {
     install_chrome
     install_brave
     install_upterm
+    install_terabox
+    ensure_aliases
     ensure_site
 
     # GitHub login di SINI (bukan di bawah): agar klone repo privat (kasir-roti)
@@ -1442,6 +1732,7 @@ main() {
     setup_gh
     restore_kasir
     setup_telegram_bot
+    setup_keepalive
 
     resolve_binaries
     write_supervisor_confs
@@ -1482,6 +1773,11 @@ main() {
     # bot Telegram: hanya kalau conf-nya ada (token kosong → conf dibuang di atas)
     if [ -f "$SUPERVISOR_DIR/30-tgbot.conf" ]; then
         start_service tg-opencode-bot
+    fi
+    # keep-alive: sesi tidak boleh keluar/blank/lock otomatis — service ini
+    # yang menjaga layar tetap hidup + pointer "bergerak" sejak boot
+    if [ -f "$SUPERVISOR_DIR/40-keepalive.conf" ]; then
+        start_service session-keepalive
     fi
     if [ "$USE_CLOUDFLARED" = "1" ]; then
         start_service cloudflared "${CLOUDFLARED_BIN} tunnel --url http://localhost:${SITE_PORT}"
@@ -1539,6 +1835,11 @@ summary() {
     fi
     echo "  Brave         : brave  (wrapper otomatis --no-sandbox; asli: /usr/bin/brave-browser)"
     echo "  Upterm        : $(command -v upterm 2>/dev/null || echo "$UPTERM_BIN")  → menu: bash /root/menu.sh (opsi 2)"
+    echo "  TeraBox       : terabox  (jendela app anti-blank; kalau blank: rm -rf /root/.config/terabox-app)"
+    echo "  Alias         : oce → opencode   age → bash /root/menu.sh  (di /root/.bashrc)"
+    if [ -f "$KEEPALIVE_CONF" ]; then
+        echo "  Keep-alive    : session-keepalive (layar tidak blank/lock, pointer jalan; log: /var/log/session-keepalive.log)"
+    fi
     echo "  SSH           : tailscale ssh root@${ts_ip}  (tanpa password; dari Termius/HP)"
     echo "  tmux          : tmux attach -t ${DEV_SESSION}"
     echo "  Secret        : $SECRET_FILE (chmod 600)"
@@ -1553,10 +1854,13 @@ summary() {
     fi
     echo
     echo "Catatan:"
+    echo "  • Sesi ANTI keluar-otomatis: session-keepalive mematikan screensaver X,"
+    echo "    menggerakkan pointer tiap ${KEEPALIVE_INTERVAL:-60} detik, menghidupkan lagi tmux"
+    echo "    session, dan re-login Tailscale kalau key-nya kedaluwarsa."
     echo "  • tailscaled/web/tunnel/service OpenCode/bot Telegram dijaga supervisord"
     echo "    → ikut bangun sendiri tiap container hidup. Cek: supervisorctl status"
-    echo "  • Menu interaktif: bash /root/menu.sh → 1) install keseluruhan"
-    echo "    2) tools: gh+opencode+Brave+upterm  3) generate SSH (auto-copy)"
+    echo "  • Menu interaktif: age (bash /root/menu.sh) → 1) Full Install"
+    echo "    2) Only Tools: gh+opencode+Brave+upterm+TeraBox  3) Generate SSH (Upterm)"
     echo "    4) list sesi  5) stop sesi  6) tambah ID Telegram  7) keluar."
     echo "  • URL https://...ts.net hanya bisa dibuka dari device yang sudah masuk"
     echo "    tailnet (HP/laptop yang login Tailscale). Luar tailnet → pakai tunnel"

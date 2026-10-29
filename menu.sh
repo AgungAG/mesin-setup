@@ -3,22 +3,23 @@
 # menu.sh — menu interaktif mesin-setup
 #
 # Opsi:
-#   1) Install keseluruhan  → jalankan setup.sh penuh (restore mesin dari nol:
+#   1) Full Install         → jalankan setup.sh penuh (restore mesin dari nol:
 #                              paket dasar, Google Chrome, Brave wrapper
 #                              --no-sandbox, Tailscale, OpenCode, upterm,
-#                              web toko roti, tunnel, GitHub). Kalau setup.sh
-#                              belum ada — misal habis reset, yang di-download
-#                              cuma menu.sh — filenya diambil otomatis dari
-#                              GitHub dulu. SELESAI → otomatis lanjut ke
-#                              langkah opsi 3 (generate SSH upterm).
-#   2) apt update + gh + opencode + Brave + upterm
-#                           → `bash setup.sh tools` (mode ringan): refresh
+#                              TeraBox (jendela app anti-blank), alias
+#                              oce/age, web toko roti, tunnel, GitHub). Kalau
+#                              setup.sh belum ada — misal habis reset, yang
+#                              di-download cuma menu.sh — filenya diambil
+#                              otomatis dari GitHub dulu. SELESAI → otomatis
+#                              lanjut ke langkah opsi 3.
+#   2) Only Tools           → `bash setup.sh tools` (mode ringan): refresh
 #                              repo lalu pasang gh, opencode, Brave, upterm,
-#                              + setup bot Telegram (config + supervisor).
-#                              Tidak menyentuh service/supervisor lain →
-#                              aman kapan saja. SELESAI → otomatis lanjut ke
-#                              langkah opsi 3 (generate SSH upterm).
-#   3) Generate SSH         → upterm host --accept -- bash. Begitu command
+#                              TeraBox, alias oce/age + setup bot Telegram
+#                              (config + supervisor). Tidak menyentuh
+#                              service/supervisor lain → aman kapan saja.
+#                              SELESAI → otomatis lanjut ke langkah opsi 3.
+#   3) Generate SSH (Upterm)
+#                           → upterm host --accept -- bash. Begitu command
 #                              SSH tercetak, OTOMATIS disalin ke clipboard
 #                              (OSC 52 ke terminal + xclip di desktop VNC)
 #                              dan disimpan ke /root/upterm-ssh.txt → tinggal
@@ -41,6 +42,12 @@
 # Pemakaian:
 #   bash /root/menu.sh        (jalur pendek; symlink ke mesin-setup/menu.sh)
 #   bash menu.sh              (dari dalam repo)
+#   age                       (alias di .bashrc → = bash /root/menu.sh;
+#                              alias oce = opencode — keduanya dibuat otomatis
+#                              oleh setup.sh, opsi 1 & 2)
+#
+# TeraBox: langkah install-nya ada di setup.sh (opsi 1 & 2) — dibuka sebagai
+#   jendela app anti-blank lewat `terabox` atau ikon desktop.
 #
 # Restore dari nol (repo ini PUBLIK — tanpa token sama sekali):
 #   curl -fsSL -o menu.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/main/menu.sh
@@ -112,21 +119,22 @@ ensure_setup_sh() {
     return 1
 }
 
-# --- Opsi 1 ------------------------------------------------------------
+# --- Opsi 1: Full Install ----------------------------------------------
 install_all() {
     ensure_setup_sh || return 0
-    log "Install keseluruhan: bash $SETUP_SH"
+    log "Full Install: bash $SETUP_SH"
     laporkan_status bash "$SETUP_SH"
     # Setelah setup penuh selesai, otomatis lanjut ke langkah opsi 3 —
     # begitu upterm terpasang, sesi SSH langsung dibuat + auto-copy.
     lanjut_generate_ssh
 }
 
-# --- Opsi 2 ------------------------------------------------------------
-# Mode ringan setup.sh: apt update + Brave + upterm + bot Telegram.
-# Tanpa setup penuh.
+# --- Opsi 2: Only Tools -------------------------------------------------
+# Mode ringan setup.sh: apt update + Brave + upterm + TeraBox + alias
+# oce/age + bot Telegram. Tanpa setup penuh.
 install_tools() {
     ensure_setup_sh || return 0
+    log "Only Tools: bash $SETUP_SH tools"
     laporkan_status bash "$SETUP_SH" tools
     # Sama seperti opsi 1: otomatis lanjut ke langkah opsi 3 (upterm sudah
     # dipasang mode tools → sesi SSH langsung bisa dibuat).
@@ -137,7 +145,7 @@ install_tools() {
 # Kalau upterm belum terpasang (install gagal/offline), host_session sendiri
 # yang memberi peringatan — opsi lain tetap bisa dipakai.
 lanjut_generate_ssh() {
-    log "Lanjut otomatis ke opsi 3: generate SSH (upterm) + copy clipboard..."
+    log "Lanjut otomatis ke opsi 3: Generate SSH (Upterm) + copy clipboard..."
     host_session
 }
 
@@ -435,10 +443,10 @@ while true; do
     cat <<'EOF'
 
   +-- mesin-setup ----------------------------------+
-  |  1) Install keseluruhan (lalu otomatis ke 3)    |
-  |  2) apt update + gh + opencode + Brave + upterm |
-  |     (+ bot Telegram, lalu otomatis ke 3)        |
-  |  3) Generate SSH (upterm) + copy clipboard      |
+  |  1) Full Install (lalu otomatis ke 3)           |
+  |  2) Only Tools (+ bot Telegram, lalu ke 3)      |
+  |     (mode ringan: gh, opencode, Brave, upterm)  |
+  |  3) Generate SSH (Upterm) + copy clipboard      |
   |  4) List sesi upterm yang aktif                  |
   |  5) Stop semua sesi upterm aktif                 |
   |  6) Tambah ID Telegram (boleh lebih dari satu)   |
