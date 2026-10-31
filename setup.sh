@@ -1569,6 +1569,14 @@ tg_notify() {
         return 0
     fi
     now=$(date +%s)
+    # Baseline sehat saat daemon baru mulai (belum pernah ada masalah di
+    # proses ini) → cukup tandai state, TIDAK kirim pesan (anti noise tiap
+    # restart service). "ok" hanya berarti PEMULIHAN kalau sebelumnya
+    # xdown/tsdown.
+    if [ "$st" = "ok" ] && [ -z "$_tg_state" ]; then
+        _tg_state="ok"
+        return 0
+    fi
     if [ "$st" = "$_tg_state" ]; then
         [ "$TG_REPEAT_EVERY" -le 0 ] && return 0
         [ $(( now - _tg_sent_at )) -lt "$TG_REPEAT_EVERY" ] && return 0
@@ -1723,7 +1731,7 @@ ts_warn() {
 # terlihat "keluar". timeout: `tailscale up` bisa hang nunggu login interaktif.
 tailscale_refresh() {
     command -v tailscale >/dev/null 2>&1 || return 0
-    local st key
+    local st out key
     # PENTING (bug lama): `tailscale debug prefs` selalu melaporkan
     # "LoggedOut": false walau mesin sudah "Logged out" → deteksi keluar
     # harus dari BackendState status (NeedsLogin), bukan dari prefs.
@@ -1731,7 +1739,15 @@ tailscale_refresh() {
     if [ -n "$st" ]; then
         printf '%s' "$st" | grep -q '"BackendState": *"NeedsLogin"' || return 0
     else
-        timeout 15 tailscale status 2>/dev/null | grep -q '^Logged out' || return 0
+        out=$(timeout 15 tailscale status 2>/dev/null) || out=""
+        if [ -z "$out" ]; then
+            # status GAGAL dicek (tailscaled hang/matikom?) → jangan klaim
+            # sehat: ditandai 2 (tak pasti) supaya status_report tidak kirim
+            # "ok" palsu; deteksi NeedsLogin yang pasti tetap menang nanti.
+            TS_BAD=2
+            return 0
+        fi
+        printf '%s' "$out" | grep -q '^Logged out' || return 0
     fi
     TS_BAD=1
     if [ ! -r "$SECRET_FILE" ]; then
@@ -1769,7 +1785,8 @@ status_report() {
         tg_notify "xdown" "⚠️ keep-alive ($HOSTNAME): tidak ada DISPLAY hidup selama $(( _x_down_n * INTERVAL )) detik — VNC/noVNC pasti kelihatan mati. Cek Xvfb/x11vnc."
     elif [ "$TS_BAD" = 1 ]; then
         tg_notify "tsdown" "⚠️ keep-alive ($HOSTNAME): Tailscale LOGGED OUT → mesin hilang dari tailnet. Isi TS_AUTHKEY=tskey-auth-... di $SECRET_FILE (buat di https://login.tailscale.com/admin/settings/keys) atau approve https://login.tailscale.com/a/c97546401033d"
-    else
+    elif [ "$TS_BAD" = 0 ]; then
+        # TS_BAD=2 (status tak bisa dipastikan) → diam, jangan klaim sehat
         tg_notify "ok" "✅ keep-alive ($HOSTNAME): sehat kembali — X aktif, Tailscale nyambung."
     fi
     return 0
