@@ -77,6 +77,36 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
    `/new` `/models` `/model` `/id` `/help` — **langsung jalan otomatis** begitu
    `setup.sh` selesai (tidak perlu start manual), lengkap dengan service
    OpenCode-nya (lihat poin 4)
+10. Keep-alive: `session-keepalive` dijaga supervisor (`40-keepalive.conf`) —
+    jalan sejak boot, bikin mesin **selalu terlihat dipakai manusia** supaya
+    tidak keluar/blank otomatis (lihat seksi khusus di bawah)
+
+## Keep-alive — mesin selalu terlihat dipakai
+
+Daemon `/usr/local/bin/session-keepalive` (dijaga supervisor, auto-restart,
+ikut pulih tiap reset) tiap ±30 detik (jitter ±5):
+
+1. **Matikan screensaver/DPMS X** — bawaan image blank tiap 600 detik →
+   x11vnc/noVNC kelihatan "mati". Juga matikan auto-lock GNOME/Cinnamon/MATE
+   dan xscreensaver (best-effort).
+2. **Tiru gerakan manusia** (random tiap siklus, via xdotool XTEST):
+   60% goyang kecil 2–11px, 20% sapuan bertahap ke titik acak, 20% parkir di
+   sudut + scroll netral — ditutup ketukan modifier (Shift/Ctrl, tidak pernah
+   mengetik karakter). Posisi pointer **dikembalikan persis** ke awal. Kalau
+   manusia asli baru bergerak (< 5 detik lalu) simulasi **dilewati** — tidak
+   rebut pointer dari user VNC.
+3. **tmux session** `oce` dibuat lagi kalau hilang (kena boot/reset).
+4. **Tailscale auto-login** kalau keluar sendiri (pakai `TS_AUTHKEY` di
+   `/root/.machine-secrets`).
+5. **Alert Telegram** kalau X tidak ada DISPLAY (≥3 siklus) atau Tailscale
+   logged out — anti-spam: hanya dikirim saat status **berubah**, diulang
+   tiap jam selama masih bermasalah, dan pesan "sehat kembali" menyusul
+   saat pulih. Butuh `TG_BOT_TOKEN` + `TG_CHAT_IDS` di
+   `/root/.machine-secrets` (sudah dipakai bot Telegram, poin 9).
+   Uji: `session-keepalive test` (kirim pesan percobaan + satu siklus penuh).
+
+Log: `/var/log/session-keepalive.log`. Anti-logout shell (`TMOUT`) juga
+dipasang di `/etc/profile.d/00-no-idle-logout.sh`.
 
 ## Bot Telegram — kode bersih, rahasia lokal
 

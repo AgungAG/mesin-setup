@@ -42,10 +42,13 @@
 #   10. Keep-alive    : session-keepalive (40-keepalive.conf) — jalan terus
 #                       sejak boot, bikin mesin SELALU terlihat dipakai manusia
 #                       supaya sesi tidak keluar otomatis: screensaver/DPMS X
-#                       dimatikan (bawaan image blank tiap 600 detik), pointer
-#                       digerakkan 2px tiap siklus (xdotool), tmux session
-#                       dibuat lagi kalau hilang, dan Tailscale login ulang
-#                       otomatis kalau keburu keluar (key expiry).
+#                       dimatikan (bawaan image blank tiap 600 detik), gerakan
+#                       pointer 3 gaya acak (goyang/sapuan/scroll netral) +
+#                       ketukan modifier tiap siklus dengan ritme ±5s, tmux
+#                       session dibuat lagi kalau hilang, Tailscale login ulang
+#                       otomatis kalau keburu keluar (key expiry), plus
+#                       NOTIFIKASI TELEGRAM kalau ada yang gagal (X mati /
+#                       Tailscale keluar). Uji: `session-keepalive test`.
 #
 # CARA KERJA PENTING:
 #   tailscaled, web server, tunnel, service OpenCode, dan bot Telegram
@@ -109,8 +112,12 @@
 #                               dialihkan ke /root/setup-takeover.log.
 #   DEV_SESSION=oce             Nama tmux session yang disiapkan.
 #   KEEPALIVE_INTERVAL=30       Jeda (detik) siklus session-keepalive —
-#                               gerak pointer + cek layar/tmux/Tailscale.
-#                               Default 60; mis. 300 kalau mau lebih jarang.
+#                               gerakan "manusia" + cek layar/tmux/Tailscale.
+#                               Default 30, di-jitter ±5 detik tiap siklus.
+#   TG_MIN_GAP=60 / TG_REPEAT_EVERY=3600
+#                               Jeda minimal antar notifikasi Telegram (saat
+#                               status BERUBAH) dan jeda kiriman ulang status
+#                               yang sama (detik; 0 = tidak diulang).
 #
 set -euo pipefail
 
@@ -1457,15 +1464,25 @@ EOF
 #      dihentikan, plus xset s noblank/-dpms.
 #   2. Auto-lock desktop umum (GNOME/Cinnamon/MATE) dimatikan — best-effort,
 #      yang tidak terpasang dilewati diam. xscreensaver (kalau ada) dihentikan.
-#   3. Pointer digeser 2px bolak-balik tiap siklus via xdotool → timer idle
-#      X/aplikasi selalu reset, "ada interaksi" terus. Tanpa xdotool fitur ini
-#      dilewati; poin 1 tetap membuat layar tidak blank.
+#   3. Gerakan "manusia" acak tiap siklus (human_activity): 60% goyang
+#      kecil 2-11px, 20% sapuan bertahap ke titik acak lalu kembali, 20%
+#      parkir di sudut desktop + scroll netral — ditutup ketukan modifier
+#      (Shift/Ctrl). Jeda siklus dijitter ±5 detik supaya ritme tidak kaku.
+#      Kalau manusia ASLI sedang aktif (xprintidle < 5s) simulasi DILEWAT —
+#      tidak rebut pointer. Semua via xdotool XTEST → timer idle X (mouse/
+#      keyboard/tombol) selalu reset; posisi pointer akhir = posisi awal.
+#      Tanpa xdotool fitur ini dilewati; poin 1 tetap membuat layar tidak blank.
 #   4. tmux session dev ($DEV_SESSION) dibuat ulang kalau hilang.
 #   5. Tailscale login ulang OTOMATIS kalau keluar sendiri (key expiry /
 #      logout) — pakai TS_AUTHKEY dari $SECRET_FILE, tanpa campur tangan.
+#   6. NOTIFIKASI TELEGRAM (tg_notify) saat ada masalah — prioritas X mati >
+#      Tailscale bermasalah > normal; pesan hanya dikirim saat STATUS BERUBAH
+#      (jeda TG_MIN_GAP anti-spam) dan diulang tiap TG_REPEAT_EVERY detik
+#      selama masih bermasalah. Butuh TG_BOT_TOKEN + TG_CHAT_IDS di
+#      $SECRET_FILE. Uji kirim: `session-keepalive test`.
 # Semua langkah BEST-EFFORT: tool/X yang tidak ada → dilewati diam, daemon
-# tidak pernah mati sendiri. Interval: KEEPALIVE_INTERVAL (detik, default 60).
-# Idempoten: script + conf ditulis ulang tiap run (isinya sama).
+# tidak pernah mati sendiri. Interval: KEEPALIVE_INTERVAL (detik, default 30,
+# jitter ±5). Idempoten: script + conf ditulis ulang tiap run (isinya sama).
 KEEPALIVE_BIN="/usr/local/bin/session-keepalive"
 KEEPALIVE_CONF="$SUPERVISOR_DIR/40-keepalive.conf"
 
@@ -1500,12 +1517,156 @@ INTERVAL="${KEEPALIVE_INTERVAL:-30}"
 SECRET_FILE="/root/.machine-secrets"
 DEV_SESSION="${DEV_SESSION:-oce}"
 TS_WARN_EVERY=20
+# Notifikasi Telegram: jeda minimal antar kiriman (ganti status) / jeda
+# kiriman ulang status yang sama (0 = tidak diulang).
+TG_MIN_GAP="${TG_MIN_GAP:-60}"
+TG_REPEAT_EVERY="${TG_REPEAT_EVERY:-3600}"
+# X harus mati N siklus baru dilaporkan & N siklus pertama dilewati (biar
+# service X/tailscale yang baru start sempat siap — cegah alarm palsu boot).
+X_NOTIFY_CYCLES="${X_NOTIFY_CYCLES:-3}"
+WARMUP_CYCLES="${WARMUP_CYCLES:-2}"
 
 log() { printf '%s [keepalive] %s\n' "$(date '+%F %T')" "$*"; }
 
+# ---- Notifikasi Telegram (dipakai status_report di bawah) ----
+# Kirim mentah ke semua chat id. Gagal → exit != 0 (state tidak ditandai
+# terkirim, jadi dicoba lagi nanti — tidak pernah hilang diam-diam).
+tg_send_raw() {
+    local msg="$1" tok chats id rc=1
+    command -v curl >/dev/null 2>&1 || return 1
+    [ -r "$SECRET_FILE" ] || return 1
+    tok=$(. "$SECRET_FILE" 2>/dev/null; printf '%s' "${TG_BOT_TOKEN:-}")
+    chats=$(. "$SECRET_FILE" 2>/dev/null; printf '%s' "${TG_CHAT_IDS:-}")
+    [ -n "$tok" ] && [ -n "$chats" ] || return 1
+    for id in $(printf '%s' "$chats" | tr ',;' ' '); do
+        if curl -fsS -m 10 -X POST "https://api.telegram.org/bot${tok}/sendMessage" \
+            --data-urlencode "chat_id=${id}" \
+            --data-urlencode "text=${msg}" >/dev/null 2>&1; then
+            rc=0
+        fi
+    done
+    return $rc
+}
+
+# Lapis anti-spam: kirim hanya saat STATUS BERUBAH (jeda TG_MIN_GAP sejak
+# kiriman terakhir); status sama diulang tiap TG_REPEAT_EVERY detik selama
+# masih bermasalah. Konfigurasi hilang → nonaktif + log sekali (bisa nyala
+# lagi setelah diisi, tanpa restart daemon).
+_tg_state=""; _tg_sent_at=0; _tg_off_logged=0
+tg_notify() {
+    local st="$1" msg="$2" now tok chats
+    [ -n "$st" ] || return 0
+    tok=""; chats=""
+    if [ -r "$SECRET_FILE" ]; then
+        tok=$(. "$SECRET_FILE" 2>/dev/null; printf '%s' "${TG_BOT_TOKEN:-}")
+        chats=$(. "$SECRET_FILE" 2>/dev/null; printf '%s' "${TG_CHAT_IDS:-}")
+    fi
+    if [ -z "$tok" ] || [ -z "$chats" ]; then
+        [ "${_tg_off_logged:-0}" = 1 ] || {
+            log "Notifikasi TG NONAKTIF: isi TG_BOT_TOKEN + TG_CHAT_IDS di $SECRET_FILE (uji: session-keepalive test)"
+            _tg_off_logged=1
+        }
+        return 0
+    fi
+    now=$(date +%s)
+    if [ "$st" = "$_tg_state" ]; then
+        [ "$TG_REPEAT_EVERY" -le 0 ] && return 0
+        [ $(( now - _tg_sent_at )) -lt "$TG_REPEAT_EVERY" ] && return 0
+    else
+        [ $(( now - _tg_sent_at )) -lt "$TG_MIN_GAP" ] && return 0
+    fi
+    if tg_send_raw "$msg"; then
+        _tg_state="$st"; _tg_sent_at=$now
+        log "Notifikasi TG terkirim [$st]"
+    else
+        _tg_sent_at=$now
+        log "PERINGATAN: notifikasi TG [$st] gagal terkirim (token/chat id salah? cek $SECRET_FILE)"
+    fi
+    return 0
+}
+
+# (3) "interaksi manusia" — gaya dipilih acak tiap siklus supaya pola gerak
+# tidak identik tiap 30 detik:
+#   60%  goyang kecil 2-11px bolak-balik (reset idle dasar)
+#   20%  sapuan bertahap 3 langkah ke titik acak ±60px, jeda, kembali
+#   20%  parkir pointer di sudut kanan-bawah (area desktop kosong) + scroll
+#        1x bawah 1x atas (netral), lalu kembali
+# Semua gaya ditutup ketukan modifier acak (Shift/Ctrl saja → TIDAK PERNAH
+# mengetik karakter). xdotool memakai XTEST → event identik input asli →
+# timer idle X (mouse/keyboard/tombol) selalu reset. Posisi pointer SELALU
+# dikembalikan persis ke awal supaya tidak mengganggu yang lagi lihat VNC.
+# Kalau manusia ASLI baru bergerak (< ACTIVE_SKIP_MS) → simulasi dilewati
+# sama sekali (mereka sudah jadi bukti "ada yang pakai"), jadi tidak rebut
+# pointer. xprintidle tidak ada → dianggap tidak ada aktivitas (tetap jalan).
+human_activity() {
+    local d="$1" style ox oy sx sy tx ty i n key dx dy idle
+    local X Y SCREEN WINDOW
+    command -v xdotool >/dev/null 2>&1 || return 0
+    if command -v xprintidle >/dev/null 2>&1; then
+        idle=$(DISPLAY="$d" xprintidle 2>/dev/null || printf '99999')
+        case "$idle" in *[!0-9]*|"") idle=99999 ;; esac
+        [ "$idle" -lt "${ACTIVE_SKIP_MS:-5000}" ] && return 0
+    fi
+    eval "$(DISPLAY="$d" xdotool getmouselocation --shell 2>/dev/null)" || true
+    ox="${X:-}"; oy="${Y:-}"
+    read -r sx sy <<< "$(DISPLAY="$d" xdotool getdisplaygeometry 2>/dev/null)"
+    sx="${sx:-393}"; sy="${sy:-738}"
+    case "$sx$sy" in *[!0-9]*) sx=393; sy=738 ;; esac
+    style=$(( RANDOM % 10 ))
+    if [ "$style" -lt 6 ]; then
+        # goyang kecil bolak-balik
+        dx=$(( (RANDOM % 10) + 2 )); dy=$(( (RANDOM % 10) + 2 ))
+        [ $(( RANDOM % 2 )) -eq 0 ] && dx=$((-dx))
+        [ $(( RANDOM % 2 )) -eq 0 ] && dy=$((-dy))
+        DISPLAY="$d" xdotool mousemove_relative -- "$dx" "$dy" 2>/dev/null || true
+        sleep 1
+        DISPLAY="$d" xdotool mousemove_relative -- "$((-dx))" "$((-dy))" 2>/dev/null || true
+    elif [ "$style" -lt 8 ] && [ -n "$ox" ] && [ -n "$oy" ]; then
+        # sapuan: 3 langkah ke titik acak dekat posisi awal, jeda, kembali
+        tx=$(( ox + (RANDOM % 121) - 60 )); ty=$(( oy + (RANDOM % 121) - 60 ))
+        [ "$tx" -lt 2 ] && tx=2; [ "$ty" -lt 2 ] && ty=2
+        [ "$tx" -gt $(( sx - 2 )) ] && tx=$(( sx - 2 ))
+        [ "$ty" -gt $(( sy - 2 )) ] && ty=$(( sy - 2 ))
+        n=3
+        for i in 1 2 3; do
+            DISPLAY="$d" xdotool mousemove $(( ox + (tx - ox) * i / n )) \
+                $(( oy + (ty - oy) * i / n )) 2>/dev/null || true
+            sleep 0.2
+        done
+        sleep 0.4
+        for i in 2 1 0; do
+            DISPLAY="$d" xdotool mousemove $(( ox + (tx - ox) * i / n )) \
+                $(( oy + (ty - oy) * i / n )) 2>/dev/null || true
+            sleep 0.2
+        done
+    else
+        # scroll netral di sudut kanan-bawah (area desktop kosong, bukan jendela)
+        tx=$(( sx - 6 )); ty=$(( sy - 6 ))
+        DISPLAY="$d" xdotool mousemove "$tx" "$ty" 2>/dev/null || true
+        sleep 0.3
+        DISPLAY="$d" xdotool click 5 2>/dev/null || true
+        sleep 0.25
+        DISPLAY="$d" xdotool click 4 2>/dev/null || true
+        sleep 0.25
+    fi
+    # kembalikan pointer persis ke posisi awal (jangan ganggu user VNC)
+    if [ -n "$ox" ] && [ -n "$oy" ]; then
+        DISPLAY="$d" xdotool mousemove "$ox" "$oy" 2>/dev/null || true
+    fi
+    # ketukan modifier: variasi Shift/Control — tidak pernah mengetik karakter
+    case $(( RANDOM % 8 )) in
+        0) key="Shift_R" ;;
+        1) key="Control_L" ;;
+        *) key="Shift_L" ;;
+    esac
+    DISPLAY="$d" xdotool key --clearmodifiers "$key" 2>/dev/null || true
+    return 0
+}
+
 # (1)+(2)+(3) — cari DISPLAY yang hidup; kalau tidak ada X, lanjut tugas lain
 x_refresh() {
-    local d dx dy
+    local d
+    X_ACTIVE=0
     for d in "${DISPLAY:-}" ":1.0" ":0.0"; do
         [ -n "$d" ] || continue
         DISPLAY="$d" xset q >/dev/null 2>&1 || continue
@@ -1523,20 +1684,9 @@ x_refresh() {
         if command -v xscreensaver-command >/dev/null 2>&1; then
             xscreensaver-command -exit 2>/dev/null || true
         fi
-        # "interaksi manusia": pointer digeser acak 2-11px lalu dikembalikan,
-        # ditutup ketukan Shift_L (modifier saja → tidak mengetik karakter
-        # apa pun). xdotool memakai XTEST → event-nya sama dengan input
-        # asli, jadi timer idle yang menghitung mouse MAUPUN keyboard selalu
-        # reset. Arah/jarak diganti tiap siklus supaya tidak pola identik.
-        if command -v xdotool >/dev/null 2>&1; then
-            dx=$(( (RANDOM % 10) + 2 )); dy=$(( (RANDOM % 10) + 2 ))
-            [ $(( RANDOM % 2 )) -eq 0 ] && dx=$((-dx))
-            [ $(( RANDOM % 2 )) -eq 0 ] && dy=$((-dy))
-            DISPLAY="$d" xdotool mousemove_relative -- "$dx" "$dy" 2>/dev/null || true
-            sleep 1
-            DISPLAY="$d" xdotool mousemove_relative -- "$((-dx))" "$((-dy))" 2>/dev/null || true
-            DISPLAY="$d" xdotool key --clearmodifiers Shift_L 2>/dev/null || true
-        fi
+        # "interaksi manusia" — gaya acak (lihat human_activity di atas)
+        human_activity "$d"
+        X_ACTIVE=1
         if [ -z "${X_OK_LOGGED:-}" ]; then
             log "X aktif (DISPLAY=$d): screensaver/DPMS dimatikan + gerakan simulasi jalan"
             X_OK_LOGGED=1
@@ -1583,6 +1733,7 @@ tailscale_refresh() {
     else
         timeout 15 tailscale status 2>/dev/null | grep -q '^Logged out' || return 0
     fi
+    TS_BAD=1
     if [ ! -r "$SECRET_FILE" ]; then
         ts_warn "Tailscale logged out dan $SECRET_FILE tidak ada → auto-login mustahil"
         return 0
@@ -1601,12 +1752,59 @@ tailscale_refresh() {
     return 0
 }
 
-# Daemon: tanpa set -e → SATU langkah gagal tidak mematikan keep-alive.
-while true; do
+# (6) Lapor ke Telegram — hanya saat STATUS BERUBAH (tg_notify sudah
+# anti-spam). Prioritas: X mati > Tailscale bermasalah > normal ("ok" dipakai
+# untuk menyatakan pemulihan). X mati harus bertahan X_NOTIFY_CYCLES siklus
+# dulu biar service X yang baru start sempat siap — tanpa ini, tiap boot
+# selalu ada alarm palsu.
+_x_down_n=0
+status_report() {
+    if [ "$X_ACTIVE" = 1 ]; then
+        _x_down_n=0
+    else
+        _x_down_n=$((_x_down_n + 1))
+    fi
+    [ "$_cycle" -le "$WARMUP_CYCLES" ] && return 0
+    if [ "$_x_down_n" -ge "$X_NOTIFY_CYCLES" ]; then
+        tg_notify "xdown" "⚠️ keep-alive ($HOSTNAME): tidak ada DISPLAY hidup selama $(( _x_down_n * INTERVAL )) detik — VNC/noVNC pasti kelihatan mati. Cek Xvfb/x11vnc."
+    elif [ "$TS_BAD" = 1 ]; then
+        tg_notify "tsdown" "⚠️ keep-alive ($HOSTNAME): Tailscale LOGGED OUT → mesin hilang dari tailnet. Isi TS_AUTHKEY=tskey-auth-... di $SECRET_FILE (buat di https://login.tailscale.com/admin/settings/keys) atau approve https://login.tailscale.com/a/c97546401033d"
+    else
+        tg_notify "ok" "✅ keep-alive ($HOSTNAME): sehat kembali — X aktif, Tailscale nyambung."
+    fi
+    return 0
+}
+
+# Mode test: kirim notifikasi percobaan + jalankan satu siklus penuh lalu
+# tampilkan hasilnya. Untuk verifikasi manual: `session-keepalive test`.
+if [ "${1:-}" = "test" ]; then
+    log "== TEST keepalive =="
+    X_ACTIVE=0; TS_BAD=0; _cycle=99
     x_refresh
     tmux_refresh
     tailscale_refresh
-    sleep "$INTERVAL"
+    log "X_ACTIVE=${X_ACTIVE:-0} TS_BAD=${TS_BAD:-0}"
+    if tg_send_raw "🧪 keep-alive test dari $HOSTNAME — notifikasi Telegram BERHASIL ($(date '+%F %T'))"; then
+        log "Kirim notifikasi TG: BERHASIL"
+    else
+        log "Kirim notifikasi TG: GAGAL — cek TG_BOT_TOKEN + TG_CHAT_IDS di $SECRET_FILE"
+    fi
+    exit 0
+fi
+
+# Daemon: tanpa set -e → SATU langkah gagal tidak mematikan keep-alive.
+# Jeda siklus dijitter ±5 detik supaya ritme tidak kaku/periodik.
+_cycle=0
+while true; do
+    _cycle=$((_cycle + 1))
+    X_ACTIVE=0; TS_BAD=0
+    x_refresh
+    tmux_refresh
+    tailscale_refresh
+    status_report
+    _jitter=$(( INTERVAL + (RANDOM % 11) - 5 ))
+    [ "$_jitter" -lt 5 ] && _jitter=5
+    sleep "$_jitter"
 done
 EOF
     $SUDO install -m 755 "$tmp" "$KEEPALIVE_BIN"
@@ -1644,7 +1842,7 @@ environment=HOME="/root",USER="root",DISPLAY="${disp}"
 EOF
     $SUDO install -m 644 "$tmp" "$KEEPALIVE_CONF"
     rm -f "$tmp"
-    log "Keep-alive sesi → ${KEEPALIVE_BIN} + $(basename "$KEEPALIVE_CONF") (interval ${KEEPALIVE_INTERVAL:-30}s)"
+    log "Keep-alive sesi → ${KEEPALIVE_BIN} + $(basename "$KEEPALIVE_CONF") (interval ${KEEPALIVE_INTERVAL:-30}s; notif TG aktif kalau TG_BOT_TOKEN+TG_CHAT_IDS ada)"
 }
 
 # =========================================================
@@ -1897,7 +2095,7 @@ summary() {
     echo "  TeraBox       : terabox  (jendela app anti-blank; kalau blank: rm -rf /root/.config/terabox-app)"
     echo "  Alias         : oce → opencode   age → bash /root/menu.sh  (di /root/.bashrc)"
     if [ -f "$KEEPALIVE_CONF" ]; then
-        echo "  Keep-alive    : session-keepalive (layar tidak blank/lock, pointer jalan; log: /var/log/session-keepalive.log)"
+        echo "  Keep-alive    : session-keepalive (gerakan manusia acak, layar tidak blank/lock; alert TG kalau X/Tailscale mati; log: /var/log/session-keepalive.log)"
     fi
     echo "  SSH           : tailscale ssh root@${ts_ip}  (tanpa password; dari Termius/HP)"
     echo "  tmux          : tmux attach -t ${DEV_SESSION}"
@@ -1914,8 +2112,10 @@ summary() {
     echo
     echo "Catatan:"
     echo "  • Sesi ANTI keluar-otomatis: session-keepalive mematikan screensaver X,"
-    echo "    menggerakkan pointer tiap ${KEEPALIVE_INTERVAL:-60} detik, menghidupkan lagi tmux"
-    echo "    session, dan re-login Tailscale kalau key-nya kedaluwarsa."
+    echo "    meniru gerakan manusia (goyang/sapuan/scroll acak + ketukan modifier)"
+    echo "    tiap ${KEEPALIVE_INTERVAL:-30} detik, menghidupkan lagi tmux session, re-login"
+    echo "    Tailscale kalau key-nya kedaluwarsa, dan kirim ALERT TELEGRAM kalau X"
+    echo "    atau Tailscale mati (uji: session-keepalive test)."
     echo "  • tailscaled/web/tunnel/service OpenCode/bot Telegram dijaga supervisord"
     echo "    → ikut bangun sendiri tiap container hidup. Cek: supervisorctl status"
     echo "  • Menu interaktif: age (bash /root/menu.sh) → 1) Full Install"
