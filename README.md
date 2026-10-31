@@ -59,7 +59,7 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 2b. Brave: `brave-browser` dari repo resmi Brave + wrapper `brave` yang selalu
     menambah `--no-sandbox` (container jalan sebagai root → sandbox Chromium
     menolak start). Buka Brave dengan perintah `brave` (`INSTALL_BRAVE=0` untuk lewati)
-2c. Upterm: `upterm` dari rilis resmi GitHub → `upterm host --accept -- bash`
+2c. Upterm: `upterm` dari rilis resmi GitHub → `upterm host --accept --skip-host-key-check -- bash`
     bikin sesi SSH temporer tanpa perlu sshd/key sama sekali (dipakai `menu.sh`
     opsi 3, lengkap dengan auto-copy command SSH ke clipboard)
 3. Tailscale (install + login `--ssh`) + `tailscale serve` → `https://<mesin>.ts.net`
@@ -127,7 +127,7 @@ bash /root/menu.sh
 |---|---|
 | 1 | **Install keseluruhan** → jalankan `setup.sh` penuh (pulihkan mesin dari nol) |
 | 2 | **apt update + gh + opencode + Brave + upterm + bot Telegram** → `bash setup.sh tools` (mode ringan; supervisor hanya untuk conf/start bot — service lain tidak disentuh) |
-| 3 | **Generate SSH** → `upterm host --accept -- bash` — begitu command SSH tercetak, **otomatis disalin ke clipboard** (OSC 52 + `xclip`) dan disimpan di `/root/upterm-ssh.txt`, jadi tinggal paste di mesin lain (sesi mati sendiri kalau host-nya keluar) |
+| 3 | **Generate SSH** → `upterm host --accept --skip-host-key-check -- bash` — begitu command SSH tercetak, **otomatis disalin ke clipboard** (OSC 52 + `xclip`) dan disimpan di `/root/upterm-ssh.txt`, jadi tinggal paste di mesin lain (sesi mati sendiri kalau host-nya keluar) |
 | 4 | **List sesi upterm aktif** → `upterm session list` (nama, status, ID, jumlah tamu) |
 | 5 | **Stop semua sesi upterm aktif** → hentikan semua sesi yang berjalan, dengan konfirmasi dulu (peringatan kalau terminal Anda sendiri ikut di sesi itu) |
 | 6 | **Keluar** |

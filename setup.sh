@@ -16,7 +16,8 @@
 #                       root → sandbox Chromium menolak start). Bisa dimatikan:
 #                       INSTALL_BRAVE=0
 #   2c. Upterm        : upterm — bikin sesi SSH temporer (`upterm host --accept
-#                       -- bash`) biar orang lain bisa ikut di shell yang sama.
+#                       --skip-host-key-check -- bash`) biar orang lain bisa ikut
+#                       di shell yang sama.
 #                       Dipakai oleh menu interaktif menu.sh (opsi 3).
 #   2d. TeraBox       : jendela aplikasi ANTI BLANK — wrapper `terabox` membuka
 #                       www.terabox.com lewat flag --app Chrome/Brave dengan
@@ -520,7 +521,7 @@ install_brave() {
 # =========================================================
 # 2c. UPTERM — SSH temporer ke shell yang sedang berjalan
 # =========================================================
-# `upterm host --accept -- bash` mencetak command SSH sementara (mis.
+# `upterm host --accept --skip-host-key-check -- bash` mencetak command SSH sementara (mis.
 # ssh xxx@uptermd.upterm.dev:2222) — siapa pun yang command-nya dipegang bisa
 # ikut di shell yang sama, tanpa perlu setup sshd/key sama sekali. Sesi mati
 # sendiri kalau host-nya keluar. Dipakai dari menu.sh (opsi 2).

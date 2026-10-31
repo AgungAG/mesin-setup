@@ -19,7 +19,7 @@
 #                              service/supervisor lain → aman kapan saja.
 #                              SELESAI → otomatis lanjut ke langkah opsi 3.
 #   3) Generate SSH (Upterm)
-#                           → upterm host --accept -- bash. Begitu command
+#                           → upterm host --accept --skip-host-key-check -- bash. Begitu command
 #                              SSH tercetak, OTOMATIS disalin ke clipboard
 #                              (OSC 52 ke terminal + xclip di desktop VNC)
 #                              dan disimpan ke /root/upterm-ssh.txt → tinggal
@@ -178,13 +178,13 @@ host_session() {
     fi
     if ! command -v script >/dev/null 2>&1; then
         warn "perintah 'script' tidak ada → command SSH harus disalin manual"
-        upterm host --accept -- bash
+        upterm host --accept --skip-host-key-check -- bash
         return 0
     fi
 
     local sess_log watcher cmd b64 i
     sess_log=$(mktemp)
-    log "Mulai sesi: upterm host --accept -- bash"
+    log "Mulai sesi: upterm host --accept --skip-host-key-check -- bash"
     echo "Begitu command SSH tercetak, otomatis:"
     echo "  • disalin ke clipboard — tinggal paste di mesin lain"
     echo "  • disimpan di $SSH_FILE"
@@ -220,7 +220,7 @@ host_session() {
     ) &
     watcher=$!
 
-    script -qefc "upterm host --accept -- bash" "$sess_log" || true
+    script -qefc "upterm host --accept --skip-host-key-check -- bash" "$sess_log" || true
 
     # sesi sudah selesai → beri watcher waktu 3 detik buat menangkap sisa
     # log, lalu hentikan; dia juga berhenti sendiri setelah 30 detik
