@@ -27,9 +27,13 @@
 #                              keluar.
 #   4) List sesi upterm     → tampilkan sesi upterm yang sedang berjalan
 #                              (nama, status, ID, jumlah tamu).
-#   5) Stop semua sesi      → hentikan SEMUA sesi upterm yang aktif (ada
-#         upterm              konfirmasi dulu; sesi terminal ini sendiri bisa
-#                              ikut terputus kalau terminalnya join via upterm).
+#   5) Copy isi SSH ke
+#         clipboard           → salin isi /root/upterm-ssh.txt (command SSH
+#                              upterm terakhir) ke clipboard — OSC 52 ke
+#                              terminal + xclip di desktop VNC — lalu
+#                              tampilkan isinya. Buat ulang kalau clipboard
+#                              sudah kepakai app lain / pindah terminal.
+#                              Filenya belum ada? jalankan opsi 3 dulu.
 #   6) Tambah ID Telegram   → daftarkan ID chat Telegram baru ke bot, BOLEH
 #                              LEBIH DARI SATU sekaligus (pisah spasi/koma).
 #                              ID disimpan ke /root/.machine-secrets +
@@ -234,7 +238,7 @@ host_session() {
     return 0
 }
 
-# --- Opsi 4 & 5: sesi upterm -------------------------------------------
+# --- Opsi 4: sesi upterm ------------------------------------------------
 # Ambil baris "nama<TAB>session-id" untuk tiap sesi upterm yang berjalan.
 # JSON-nya di-parse python3 (selalu ada di image ini) dengan cadangan jq —
 # parsing tabel teks rawan pecah kalau format CLI upterm berubah.
@@ -269,59 +273,50 @@ list_sessions() {
     if [ "${n:-0}" -eq 0 ]; then
         log "Tidak ada sesi upterm yang berjalan"
     else
-        log "$n sesi berjalan — detail: upterm session info <nama>   (stop: opsi 5)"
+        log "$n sesi berjalan — detail: upterm session info <nama>   (stop: upterm session stop <id>)"
     fi
     return 0
 }
 
 # --- Opsi 5 ------------------------------------------------------------
-# Hentikan semua sesi upterm. Sengaja minta konfirmasi: kalau terminal INI
-# sendiri join lewat upterm (opsi 3), sesi sendiri ikut mati → koneksi putus.
-stop_sessions() {
-    if ! command -v upterm >/dev/null 2>&1; then
-        warn "upterm belum terinstall → jalankan opsi 1 atau 2 dulu"
+# Salin isi $SSH_FILE (command SSH upterm terakhir) ke clipboard — cara
+# cepat "ambil lagi" command-nya kalau clipboard sudah kepakai aplikasi lain
+# atau user pindah terminal, tanpa harus bikin sesi baru (opsi 3):
+#   1. OSC 52  → clipboard TERMINAL yang memutar menu ini (ikut lewat SSH,
+#                 asal klien terminalnya mendukung OSC 52)
+#   2. xclip   → clipboard desktop VNC (kalau DISPLAY ada & xclip terpasang)
+# Isinya juga selalu ditampilkan → kalau keduanya tidak tersedia, tinggal
+# select/copy manual.
+copy_ssh_clipboard() {
+    local isi b64 ke=0
+
+    if [ ! -s "$SSH_FILE" ]; then
+        warn "$SSH_FILE kosong/belum ada → jalankan opsi 3 (Generate SSH) dulu"
         return 0
     fi
-    local pairs n=0 name id stopped=0 failed=0 cur="" jawab=""
-    if ! pairs=$(upterm_session_pairs 2>/dev/null); then
-        warn "daftar sesi tidak bisa dibaca (butuh python3/jq) → tidak ada yang dihentikan"
-        return 0
-    fi
-    n=$(printf '%s\n' "$pairs" | grep -c . || true)
-    if [ "${n:-0}" -eq 0 ]; then
-        log "Tidak ada sesi upterm yang berjalan"
-        return 0
-    fi
+    isi=$(cat "$SSH_FILE")   # $(...) membuang newline di akhir file
 
-    echo "Sesi yang akan dihentikan:"
-    printf '%s\n' "$pairs" | awk -F'\t' '{printf "  • %s  (%s)\n", $1, $2}'
-
-    # 'upterm session current' sukses kalau terminal ini sendiri ada di dalam
-    # sesi upterm → peringatan sebelum user menjawab y.
-    cur=$(upterm session current 2>/dev/null | awk '/^Session:/{print $2; exit}' || true)
-    if [ -n "$cur" ] && printf '%s\n' "$pairs" | grep -Fq "$cur"; then
-        warn "Terminal INI sendiri ada di sesi di atas → koneksi bisa TERPUTUS"
+    # OSC 52: base64 tanpa wrap; tulis ke /dev/tty bila ada, kalau tidak
+    # (misal dijalankan tanpa terminal) jatuh ke stdout biasa
+    b64=$(printf '%s' "$isi" | base64 -w0 2>/dev/null || printf '%s' "$isi" | base64)
+    if { printf '\033]52;c;%s\007' "$b64" > /dev/tty; } 2>/dev/null; then
+        ke=1
+    elif printf '\033]52;c;%s\007' "$b64" 2>/dev/null; then
+        ke=1
     fi
 
-    read -r -p "  Hentikan semua sesi di atas? [y/N] " jawab || jawab=""
-    case "$jawab" in
-        y|Y|ya|Ya|YA) ;;
-        *) log "Dibatalkan — tidak ada sesi yang dihentikan"; return 0 ;;
-    esac
+    # cadangan lokal: clipboard X11 (desktop VNC bawaan image)
+    if command -v xclip >/dev/null 2>&1 \
+        && printf '%s' "$isi" | xclip -selection clipboard 2>/dev/null; then
+        ke=1
+    fi
 
-    while IFS=$'\t' read -r name id; do
-        [ -n "$id" ] || continue
-        if upterm session stop "$id" >/dev/null 2>&1; then
-            log "Dihentikan: $name ($id)"
-            stopped=$((stopped + 1))
-        else
-            warn "Gagal menghentikan: $name ($id)"
-            failed=$((failed + 1))
-        fi
-    done <<EOF
-$pairs
-EOF
-    log "Selesai: $stopped dihentikan, $failed gagal"
+    if [ "$ke" -eq 1 ]; then
+        log "Isi $SSH_FILE disalin ke clipboard:"
+    else
+        warn "Tidak ada clipboard yang terdeteksi → copy manual dari $SSH_FILE"
+    fi
+    printf '\033[1;92m    %s\033[0m\n' "$isi"
     return 0
 }
 
@@ -448,7 +443,7 @@ while true; do
   |     (mode ringan: gh, opencode, Brave, upterm)  |
   |  3) Generate SSH (Upterm) + copy clipboard      |
   |  4) List sesi upterm yang aktif                  |
-  |  5) Stop semua sesi upterm aktif                 |
+  |  5) Copy isi upterm-ssh.txt ke clipboard         |
   |  6) Tambah ID Telegram (boleh lebih dari satu)   |
   |  7) Keluar                                      |
   +-------------------------------------------------+
@@ -459,7 +454,7 @@ EOF
         2)      install_tools ;;
         3)      host_session ;;
         4)      list_sessions ;;
-        5)      stop_sessions ;;
+        5)      copy_ssh_clipboard ;;
         6)      add_chat_ids ;;
         7|q|Q)  log "Keluar."; exit 0 ;;
         *)      warn "Pilihan tidak dikenal: '$pilih' (pakai 1/2/3/4/5/6/7)" ;;

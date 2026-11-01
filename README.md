@@ -159,7 +159,7 @@ bash /root/menu.sh
 | 2 | **apt update + gh + opencode + Brave + upterm + bot Telegram** → `bash setup.sh tools` (mode ringan; supervisor hanya untuk conf/start bot — service lain tidak disentuh) |
 | 3 | **Generate SSH** → `upterm host --accept --skip-host-key-check -- bash` — begitu command SSH tercetak, **otomatis disalin ke clipboard** (OSC 52 + `xclip`) dan disimpan di `/root/upterm-ssh.txt`, jadi tinggal paste di mesin lain (sesi mati sendiri kalau host-nya keluar) |
 | 4 | **List sesi upterm aktif** → `upterm session list` (nama, status, ID, jumlah tamu) |
-| 5 | **Stop semua sesi upterm aktif** → hentikan semua sesi yang berjalan, dengan konfirmasi dulu (peringatan kalau terminal Anda sendiri ikut di sesi itu) |
+| 5 | **Copy isi `/root/upterm-ssh.txt` ke clipboard** → salin lagi command SSH upterm terakhir (OSC 52 + `xclip`) lalu tampilkan isinya — buat ulang kalau clipboard sudah kepakai app lain; kalau file-nya belum ada, jalankan opsi 3 dulu |
 | 6 | **Keluar** |
 
 Mode tools juga bisa dipanggil langsung tanpa menu:
