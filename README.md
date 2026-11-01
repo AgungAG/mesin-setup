@@ -14,9 +14,10 @@ curl -fsSL -o setup.sh https://raw.githubusercontent.com/AgungAG/mesin-setup/mai
 bash setup.sh
 ```
 
-Selesai — sisanya jalan sendiri. (Alternatif: `menu.sh` — menu opsi
-*install keseluruhan / generate SSH upterm / keluar*, lihat
-[Menu interaktif](#menu-iteraktif).)
+Selesai — sisanya jalan sendiri. (Alternatif: `menu.sh` — menu interaktif
+dengan 7 opsi: install keseluruhan, mode tools, generate SSH upterm, list
+sesi, copy clipboard, tambah ID Telegram, keluar — lihat
+[Menu interaktif](#menu-interaktif).)
 
 Dua command manual Google Chrome (keyring + `sources.list`) yang dulu harus
 dijalankan dulu biar `sudo apt update` jalan **sudah masuk di dalam script**
@@ -54,7 +55,7 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
    — jalan **paling awal**, sebelum `apt update` pertama, biar reset pertama
    tidak berhenti dengan error `NO_PUBKEY`
 1. Paket dasar: `git tmux gh jq curl ca-certificates xclip`
-   (`xclip` buat fitur copy-ke-clipboard `menu.sh` opsi 3 di desktop VNC)
+   (`xclip` buat fitur copy-ke-clipboard `menu.sh` opsi 3 & 5 di desktop VNC)
 2. Google Chrome: `google-chrome-stable` dari repo resmi Google (`INSTALL_CHROME=0` untuk lewati)
 2b. Brave: `brave-browser` dari repo resmi Brave + wrapper `brave` yang selalu
     menambah `--no-sandbox` (container jalan sebagai root → sandbox Chromium
@@ -72,6 +73,8 @@ Semua opsional. Bisa juga dititipkan ke `/root/.machine-secrets` (format
 6. Web toko roti: `python3 -m http.server` di `/root/toko-roti`
 7. Tunnel publik cloudflared (URL disimpan di `/root/cloudflared-url.txt`)
 8. GitHub: `gh login`, identitas git, auto-commit + push `toko-roti` dan script ini
+   (berkas rahasia diblokir `.githooks/pre-commit` + dibuang dari staging —
+   lihat [Rahasia & git](#rahasia--git--3-lapis-pengaman))
 9. Bot Telegram: bot AI di `@<bot>_bot` → dijawab model **gratis** OpenCode
    (MiMo/DeepSeek/GLM/dll), dijaga supervisor (`30-tgbot.conf`). Perintah:
    `/new` `/models` `/model` `/id` `/help` — **langsung jalan otomatis** begitu
@@ -144,9 +147,35 @@ Catatan: `config.json` dibuat ulang tiap run → kalau mau ganti model default /
 chat id, ubah lewat `.machine-secrets` (bukan edit `config.json` manual).
 Log bot: `/var/log/tg-opencode-bot.log`. Cek: `supervisorctl status tg-opencode-bot`.
 
+## Rahasia & git — 3 lapis pengaman
+
+Repo ini PUBLIK, jadi semua token tinggal di `/root/.machine-secrets`
+(`chmod 600`) dan tidak pernah disentuh git. Tiga lapis pengaman supaya
+rahasia tidak pernah ter-commit / ter-push:
+
+| Lapis | Cara kerja |
+|---|---|
+| `/root/.machine-secrets` | semua token (`GH_TOKEN`, `TS_AUTHKEY`, `TG_BOT_TOKEN`, `TG_CHAT_IDS`) tinggal di sini — di luar repo, dibaca setup.sh lewat env |
+| `.gitignore` | blokir **nama** berkas: `upterm-ssh.txt`, `.machine-secrets`, `cloudflared-url.txt`, `.env*`, `*.pem`/`*.key`, `id_rsa`/`id_ed25519`, `config.json`, `*.log` |
+| `.githooks/pre-commit` | blokir **isi** perubahan juga: pola token/key sungguhan — `ghp_…`, `github_pat_…`, `tskey-auth-…`, `TG_BOT_TOKEN=<panjang>`, `-----BEGIN … PRIVATE KEY-----`, sampai command SSH upterm `…@uptermd.upterm.dev` |
+
+Hook-nya konfigurasi git **lokal** (tidak ikut versi) → sekali per mesin:
+
+```bash
+git config core.hooksPath .githooks     # otomatis di-set setup.sh (clone & backup)
+```
+
+`setup.sh` juga membuang berkas rahasia dari staging sebelum `commit`+`push`
+di backup toko-roti & kasir-roti yang memakai `git add -A`. Kalau hook menolak
+commit yang menurutmu aman, pindahkan dulu rahasianya — `--no-verify` cuma buat
+false-positive yang sudah dicek sendiri.
+
+Command SSH upterm (`/root/upterm-ssh.txt`) juga tidak pernah ikut git:
+opsi 5 `menu.sh` hanya menyalinnya ke **clipboard** (OSC 52 + `xclip`).
+
 ## Menu interaktif
 
-Selain `setup.sh`, repo ini berisi `menu.sh` — menu simpel dengan tiga opsi.
+Selain `setup.sh`, repo ini berisi `menu.sh` — menu simpel dengan tujuh opsi.
 Sudah dipasang otomatis sebagai `/root/menu.sh` (symlink) tiap `setup.sh` jalan:
 
 ```bash
@@ -160,7 +189,8 @@ bash /root/menu.sh
 | 3 | **Generate SSH** → `upterm host --accept --skip-host-key-check -- bash` — begitu command SSH tercetak, **otomatis disalin ke clipboard** (OSC 52 + `xclip`) dan disimpan di `/root/upterm-ssh.txt`, jadi tinggal paste di mesin lain (sesi mati sendiri kalau host-nya keluar) |
 | 4 | **List sesi upterm aktif** → `upterm session list` (nama, status, ID, jumlah tamu) |
 | 5 | **Copy isi `/root/upterm-ssh.txt` ke clipboard** → salin lagi command SSH upterm terakhir (OSC 52 + `xclip`) lalu tampilkan isinya — buat ulang kalau clipboard sudah kepakai app lain; kalau file-nya belum ada, jalankan opsi 3 dulu |
-| 6 | **Keluar** |
+| 6 | **Tambah ID Telegram** → daftarkan ID chat baru (boleh lebih dari satu) ke bot; disimpan ke `/root/.machine-secrets` + `config.json` lalu bot di-restart |
+| 7 | **Keluar** |
 
 Mode tools juga bisa dipanggil langsung tanpa menu:
 
@@ -189,7 +219,8 @@ bash menu.sh
   tiap container hidup. Cek: `supervisorctl status`.
 - Desktop/VNC/nginx itu urusan image bawaan, tidak disentuh script ini.
 - Secret disimpan di `/root/.machine-secrets` (`chmod 600`) — **jangan pernah
-  di-commit ke git**.
+  di-commit ke git** (dijaga `.gitignore` + `.githooks/pre-commit`, lihat
+  [Rahasia & git](#rahasia--git--3-lapis-pengaman)).
 - Repo web toko roti: [`AgungAG/toko-roti`](https://github.com/AgungAG/toko-roti) (privat).
 - Ambil-alih tailscaled (sekali saja, biar ikut auto-start):
   `TAKE_TAILSCALE=1 bash setup.sh` — jalankan dari dalam tmux.

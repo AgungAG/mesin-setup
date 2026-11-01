@@ -1,0 +1,38 @@
+#!/bin/sh
+#
+# pre-commit — jaga supaya RAHASIA tidak pernah ikut commit/push ke GitHub.
+# Repo ini PUBLIK (lihat .gitignore & README). Aktifkan sekali per mesin:
+#     git config core.hooksPath .githooks
+# (setup.sh menyalakannya otomatis; lewati sekali: git commit --no-verify)
+#
+# Pola "panjang" disengaja (token asli berpuluh karakter) supaya
+# contoh/placeholder di dokumentasi tidak dianggap rahasia.
+set -u
+
+pola_nama='(^|/)(\.machine-secrets|upterm-ssh\.txt|cloudflared-url\.txt|\.env(\..*)?|id_rsa|id_ed25519|id_ecdsa|[^/]*\.(pem|key|p12|pfx|kdbx))$|(^|/)config\.json$|\.log$'
+pola_isi='-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22}|gho_[A-Za-z0-9]{36}|tskey-(auth|op|eph|extra)-[A-Za-z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|[0-9]{6,}:AA[A-Za-z0-9_-]{30,}|TG_BOT_TOKEN=[A-Za-z0-9:_-]{20,}|GH_TOKEN=(ghp_|github_pat_)[A-Za-z0-9_]{10,}|[A-Za-z0-9]{16,}@uptermd\.upterm\.dev'
+
+blokir=0
+
+# 1) nama berkas yang tidak boleh masuk repo sama sekali
+# (-e: pola bisa diawali '-' seperti '-----BEGIN ... PRIVATE KEY')
+nama=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -Ee "$pola_nama" || true)
+if [ -n "$nama" ]; then
+    printf '\n[pre-commit] DITOLAK — berkas rahasia/runtime ikut ter-stage:\n%s\n' "$nama"
+    blokir=1
+fi
+
+# 2) isi perubahan yang mau di-commit (baris + saja, tanpa konteks)
+isi=$(git diff --cached -U0 --diff-filter=ACM 2>/dev/null | grep -Ee "$pola_isi" || true)
+if [ -n "$isi" ]; then
+    printf '\n[pre-commit] DITOLAK — pola rahasia terdeteksi di perubahan ini:\n%s\n' "$isi"
+    blokir=1
+fi
+
+if [ "$blokir" -eq 1 ]; then
+    printf '\nRepo ini PUBLIK. Simpan rahasianya di /root/.machine-secrets\n'
+    printf '(chmod 600) lalu commit ulang tanpa isinya.\n'
+    printf 'Kalau yakin ini false-positive: git commit --no-verify\n\n'
+    exit 1
+fi
+exit 0

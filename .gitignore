@@ -1,6 +1,32 @@
 # RAHASIA & runtime — jangan pernah masuk GitHub (repo ini publik)
+# Dijaga 2 lapis:
+#   1. daftar ini (file tidak bisa ke-stage kalau bukan -f)
+#   2. .githooks/pre-commit (cek isi berkas juga: token/kunci sungguhan)
+#      → aktifkan: git config core.hooksPath .githooks
+#      (setup.sh menyalakannya otomatis tiap backup/clone)
+
+# Rahasia mesin — aslinya di /root (di luar repo), tetap di-ignore kalau
+# suatu saat isinya ikut ter-copy ke sini:
+.machine-secrets
+upterm-ssh.txt
+cloudflared-url.txt
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.kdbx
+id_rsa
+id_ed25519
+id_ecdsa
+
+# Config bot Telegram (ditulis ulang dari .machine-secrets tiap setup.sh):
 bot-telegram/config.json
 bot-telegram/state.json
 bot-telegram/*.log
+
+# Runtime:
+*.log
 __pycache__/
 *.pyc

@@ -1234,6 +1234,39 @@ configure_git_identity() {
     git config --global init.defaultBranch >/dev/null 2>&1 || git config --global init.defaultBranch main
 }
 
+# --- Penjaga rahasia (2 lapis, dipakai semua backup git) ----------------
+# Nama berkas yang tidak boleh ter-commit/ter-push — sama persis dengan yang
+# di-ignore .gitignore dan diblokir .githooks/pre-commit.
+SECRET_STAGED_RE='(^|/)(\.machine-secrets|upterm-ssh\.txt|cloudflared-url\.txt|\.env(\..*)?|id_rsa|id_ed25519|id_ecdsa|[^/]*\.(pem|key|p12|pfx|kdbx))$|(^|/)config\.json$|\.log$'
+
+# Lapis 1 untuk backup yang memakai `git add -A` (toko-roti & kasir-roti):
+# buang berkas rahasia dari staging SEBELUM commit+push — walau repo-nya
+# privat, .env/kunci/token tidak boleh ikut ter-push ke mana pun.
+unstage_secrets() {
+    local dir="$1" f
+    command -v git >/dev/null 2>&1 || return 0
+    [ -d "$dir/.git" ] || return 0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        git -C "$dir" reset -q -- "$f" 2>/dev/null || true
+        warn "Rahasia dibuang dari staging → TIDAK jadi ter-push: $dir/$f"
+    done <<EOF
+$(git -C "$dir" diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -Ee "$SECRET_STAGED_RE" || true)
+EOF
+    return 0
+}
+
+# Lapis 2 untuk repo mesin-setup: aktifkan hook .githooks/pre-commit yang juga
+# memeriksa ISI berkas (token/key sungguhan). core.hooksPath itu konfigurasi
+# lokal (tidak ikut versi) → diset ulang tiap kali repo ini disentuh.
+enable_secret_guard() {
+    local dir="${1:-/root/mesin-setup}"
+    command -v git >/dev/null 2>&1 || return 0
+    [ -d "$dir/.git" ] && [ -f "$dir/.githooks/pre-commit" ] || return 0
+    git -C "$dir" config core.hooksPath .githooks 2>/dev/null || true
+    return 0
+}
+
 backup_site() {
     command -v git >/dev/null 2>&1 || return 0
     [ -d "$SITE_DIR" ] || return 0
@@ -1247,6 +1280,7 @@ backup_site() {
         log "git init: $SITE_DIR"
     fi
     git -C "$SITE_DIR" add -A
+    unstage_secrets "$SITE_DIR"
     if git -C "$SITE_DIR" diff --cached --quiet 2>/dev/null; then
         log "Backup toko-roti: tidak ada perubahan"
     else
@@ -1317,6 +1351,7 @@ backup_kasir() {
     command -v git >/dev/null 2>&1 || return 0
     [ -d "$src/.git" ] || return 0
     git -C "$src" add -A
+    unstage_secrets "$src"
     if git -C "$src" diff --cached --quiet 2>/dev/null; then
         log "Backup kasir-roti: tidak ada perubahan"
         return 0
@@ -1784,7 +1819,7 @@ status_report() {
     if [ "$_x_down_n" -ge "$X_NOTIFY_CYCLES" ]; then
         tg_notify "xdown" "⚠️ keep-alive ($HOSTNAME): tidak ada DISPLAY hidup selama $(( _x_down_n * INTERVAL )) detik — VNC/noVNC pasti kelihatan mati. Cek Xvfb/x11vnc."
     elif [ "$TS_BAD" = 1 ]; then
-        tg_notify "tsdown" "⚠️ keep-alive ($HOSTNAME): Tailscale LOGGED OUT → mesin hilang dari tailnet. Isi TS_AUTHKEY=tskey-auth-... di $SECRET_FILE (buat di https://login.tailscale.com/admin/settings/keys) atau approve https://login.tailscale.com/a/c97546401033d"
+        tg_notify "tsdown" "⚠️ keep-alive ($HOSTNAME): Tailscale LOGGED OUT → mesin hilang dari tailnet. Isi TS_AUTHKEY=tskey-auth-... di $SECRET_FILE (buat di https://login.tailscale.com/admin/settings/keys) atau approve lewat link yang tercetak saat tailscale login (lihat log tailscaled)"
     elif [ "$TS_BAD" = 0 ]; then
         # TS_BAD=2 (status tak bisa dipastikan) → diam, jangan klaim sehat
         tg_notify "ok" "✅ keep-alive ($HOSTNAME): sehat kembali — X aktif, Tailscale nyambung."
@@ -1888,6 +1923,7 @@ adopt_script() {
 ensure_setup_repo() {
     local dir="/root/mesin-setup" url="https://github.com/AgungAG/mesin-setup.git"
     command -v git >/dev/null 2>&1 || return 0
+    enable_secret_guard "$dir"          # repo sudah ada → hook anti-rahasia aktif
     if [ -e "$dir/.git" ]; then
         adopt_script setup.sh
         adopt_script menu.sh
@@ -1904,6 +1940,7 @@ ensure_setup_repo() {
     fi
     adopt_script setup.sh
     adopt_script menu.sh
+    enable_secret_guard "$dir"          # clone baru → hook anti-rahasia aktif
     log "setup.sh ada di $dir/setup.sh (jalur /root/setup.sh tetap jalan)"
 }
 
@@ -1911,12 +1948,19 @@ backup_setup() {
     local dir="/root/mesin-setup"
     command -v git >/dev/null 2>&1 || return 0
     [ -e "$dir/.git" ] || return 0
-    git -C "$dir" add setup.sh menu.sh README.md
-    [ ! -d "$dir/bot-telegram" ] || git -C "$dir" add bot-telegram .gitignore
+    enable_secret_guard "$dir"          # .githooks/pre-commit → rahasia ditolak
+    git -C "$dir" add setup.sh menu.sh README.md .gitignore
+    [ ! -d "$dir/.githooks" ] || git -C "$dir" add .githooks
+    [ ! -d "$dir/bot-telegram" ] || git -C "$dir" add bot-telegram
     if git -C "$dir" diff --cached --quiet 2>/dev/null; then
         log "Backup setup.sh: tidak ada perubahan"
+    elif ! git -C "$dir" commit -qm "backup otomatis $(date '+%F %T')"; then
+        # Guard .githooks/pre-commit menolak → jangan dipaksa (di bawah set -e
+        # commit gagal = script mati) dan staging sengaja dibiarkan supaya
+        # kelihatan berkas mana yang ditahan.
+        warn "Backup setup.sh ditahan guard anti-rahasia (.githooks/pre-commit)"
+        warn "  cek: git -C $dir diff --cached --name-only"
     else
-        git -C "$dir" commit -qm "backup otomatis $(date '+%F %T')"
         log "Backup setup.sh: $(git -C "$dir" log -1 --oneline)"
         if git -C "$dir" push --quiet 2>/dev/null; then
             log "Push setup.sh ke GitHub OK"
